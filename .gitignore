@@ -1,0 +1,23 @@
+# Databases
+lmu_telemetry.db
+lmu_telemetry.db-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs and State
+err.txt
+logger_state.txt
+*.log
+
+# Environment
+.env
+venv/
+env/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
