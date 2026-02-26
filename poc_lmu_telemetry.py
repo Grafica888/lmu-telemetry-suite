@@ -28,8 +28,10 @@ def main():
                         telemetry = info.playersVehicleTelemetry()
                         
                         # Auslesen der relevanten Daten aus rF2VehicleTelemetry
+                        # LMU nullt mEngineTorque leider aus. Daher nutzen wir Längsbeschleunigung als Proxy (wie im Data Logger)
                         rpm = telemetry.mEngineRPM
-                        torque = telemetry.mEngineTorque
+                        accel_z = -telemetry.mLocalAccel.z
+                        torque = accel_z * 1000
                         gear = telemetry.mGear
                         speed = telemetry.mLocalVel.z # Z-Achse ist meist die Längsgeschwindigkeit (in m/s)
                         speed_kmh = abs(speed) * 3.6

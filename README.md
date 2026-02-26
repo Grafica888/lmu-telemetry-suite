@@ -100,3 +100,9 @@ Damit das Overlay weiß, wann du schalten musst, musst du zuerst die perfekten S
 
 ---
 *Happy Racing & Shifting!* 🏎️💨
+
+---
+
+## 📄 Lizenz
+
+Dieses Projekt ist unter der **Creative Commons Attribution-NoDerivatives 4.0 International (CC BY-ND 4.0)** Lizenz lizenziert. Weitere Details findest du in der Datei `LICENSE` oder auf [Creative Commons](https://creativecommons.org/licenses/by-nd/4.0/).
