@@ -39,7 +39,7 @@ Nachdem Python und das Plugin installiert sind, musst du das Tool nicht umständ
 Das Script prüft beim ersten Start alle Paket-Abhängigkeiten (`pip install`) automatisch. Anschließend öffnen sich folgende Dinge:
 - **Ein minimiertes Konsolenfenster:** Der Data-Logger, der auf Spiel-Events lauscht. Let it run!
 - **Das Dashboard im Browser:** Hier kannst du die Telemetriedaten auswerten.
-- **Ein kleines Fenster für das Overlay:** Wenn du möchtest, kannst du hier das Live-Shift-Overlay für dein Spiel aktivieren.
+- **Ein Einstellungs-Fenster für das Overlay:** Hier kannst du das Live-Shift-Overlay für dein Spiel aktivieren und verwalten.
 
 ---
 
@@ -48,12 +48,14 @@ Das Script prüft beim ersten Start alle Paket-Abhängigkeiten (`pip install`) a
 Damit das Overlay weiß, wann du schalten musst, musst du zuerst die perfekten Schaltpunkte berechnen lassen:
 
 1. **Aufzeichnung:** Fahre in LMU auf die Strecke. Mach eine Benchmark-Vollgas-Fahrt (z.B. aus dem Stand voll durchbeschleunigen bis Vmax). Das Tool zeichnet automatisch auf, sobald du Vollgas gibst und bricht erst ab, wenn du vom Gas gehst.
-2. **Dashboard > Shift Optimizer:** Öffne das Dashboard (welches bei `Start_LMU_Suite.bat` von selbst im Browser aufgeht).
-3. **Schaltpunkte Berechnen:** Wähle den soeben gemachten Run aus dem Dropdown. Gib deine "Gear Ratios" (Getriebeübersetzung aus dem Setup-Menü des Spiels) und die "Final Drive" (Achsübersetzung) ein und klicke auf "Berechnen".
-4. **Overlay Config:** Gehe in das `LMU Shift Overlay Setup` Fenster.
-5. **Wähle das Profil:** Im Dropdown sollte nun "Run X: [Fahrzeugname]" auftauchen! Wähle es aus.
-6. **Schalt-Vorwarnzeit / Delay:** Da der Mensch Reaktionszeit hat, kannst du einen Delay eingeben (z.B. `150` ms). Das Overlay berechnet, wie schnell die Drehzahl gerade steigt und gibt dir das grüne "SHIFT!"-Signal `150` Millisekunden *früher*, damit du physisch genau am perfekten Punkt abschaltest!
-7. Klicke auf **"Overlay Starten"**. Das Setup-Menü verschwindet, du siehst nurnoch einen grauen/grünen oder gelben Kreis, den du über das Spiel ziehen kannst (bei "Randlos Fenster" / "Windowed Borderless" Mode in LMU). (Um das Overlay zu schließen: Doppelklick auf die Lampe).
+2. **Dashboard > Shift Optimizer:** Öffne das Dashboard.
+3. **Schaltpunkte Berechnen:** Wähle den soeben gemachten Run aus dem Dropdown. Gib deine LMU-Autodaten ("Gear Ratios", "Final Drive") ein und klicke auf "Berechnen". Das Dashboard speichert das Profil "Run X" fürs Overlay.
+4. **Overlay Setup GUI:** Öffne das `LMU Shift Overlay Setup`.
+5. **Wähle das Profil:** Das Dropdown zeigt nun "Run X: [Fahrzeugname]". Wähle es aus. (Das Overlay aktualisiert die Schaltpunkte jetzt live, wenn du das Profil hier wechselst, ohne das Overlay schließen zu müssen!)
+6. **Schalt-Vorwarnzeit / Delay:** Da der Mensch Reaktionszeit hat, kannst du einen Delay eingeben (z.B. `150` ms). Das Overlay gibt dir das "SHIFT!"-Signal entsprechend früher, damit du physisch genau am perfekten Punkt abschaltest.
+7. **Sperren & Position:** Klicke auf **"Overlay Starten/Stoppen"**. Es erscheint ein rahmenloses Pop-up-Modul (Der eigentliche "Schalt-Kreis"), den du im Spielverlauf (bei "Randlos Fenster" in LMU) dorthin ziehen kannst, wo er dir am besten nützt.
+   - **Position merken**: Das Tool merkt sich automatisch, wo du das Overlay auf dem Bildschirm abgelegt hast!
+   - **Sperre**: Setze im Haupt-Fenster den Haken "Position sperren", damit du das Overlay im Rennbetrieb nie wieder versehentlich mit der Maus verschieben kannst!
 
 ---
 *Happy Racing & Shifting!* 🏎️💨
