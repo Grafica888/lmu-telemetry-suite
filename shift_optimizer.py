@@ -7,14 +7,15 @@ class ShiftOptimizer:
     def __init__(self, db_path="lmu_telemetry.db"):
         self.db_path = db_path
 
-    def get_torque_curve_from_run(self, run_id, gear_ratios, final_drive):
+    def get_torque_curve_from_run(self, run_id, gear_ratios, final_drive, mass_kg=1200.0, wheel_radius_m=0.33, c_w_a=1.5, rho=1.225):
         """
         Liest die Telemetriedaten eines bestimmten Runs und berechnet
-        eine interpolierte/extrapolierte Drehmomentkurve.
+        eine interpolierte/extrapolierte Drehmomentkurve in echten Nm unter
+        Berücksichtigung von Masse, Luft- und Rollwiderstand.
         """
         conn = sqlite3.connect(self.db_path)
         # Hole alle Daten mit offener Drosselklappe (Volllast) über 2000 RPM
-        query = f"SELECT rpm, torque, gear FROM telemetry_data WHERE run_id = {run_id} AND throttle > 0.95 AND rpm > 2000 ORDER BY rpm ASC"
+        query = f"SELECT rpm, torque, gear, speed_kmh FROM telemetry_data WHERE run_id = {run_id} AND throttle > 0.95 AND rpm > 2000 ORDER BY rpm ASC"
         df = pd.read_sql_query(query, conn)
         conn.close()
 
@@ -24,18 +25,30 @@ class ShiftOptimizer:
         # Filtern von ungültigen Daten (z.B. Schalt-Löcher mit negativer Beschleunigung/Torque)
         df = df[df['torque'] > 0].copy()
         
-        # Leite approximiertes Motor-Drehmoment (T_engine) ab:
-        # T_wheel (proxy) = accel_z * 1000 = df['torque']
-        # T_engine = T_wheel / (Gang_Ratio * Final_Drive)
-        
         def calc_engine_torque(row):
             g = int(row['gear'])
             if 1 <= g <= len(gear_ratios):
                 ratio = gear_ratios[g - 1]
             else:
                 ratio = gear_ratios[-1]
-            return row['torque'] / (ratio * final_drive)
+                
+            # 'torque' ist aktuell accel_z * 1000
+            a = row['torque'] / 1000.0 # Beschleunigung in m/s^2
             
+            # Netto-Zugkraft am Rad (F = m * a)
+            # Wir verzichten hier auf die Addition von Luftwiderstand (F_drag). 
+            # Warum? Der Algorithmus nimmt weiter unten das 95%-Quantil aller Datenpunkte. 
+            # Bei gleicher RPM hat der niedrigste Gang die höchste Beschleunigung (weil kaum Luftwiderstand).
+            # Das Quantil zieht sich also ohnehin automatisch die "reinen" Motorwerte aus Gang 1 & 2.
+            # Luftwiderstand würde bei Ungenauigkeiten in hohen Gängen die Kurve rechnerisch "explodieren" lassen.
+            F_wheel_net = mass_kg * a
+            
+            # Rad-Drehmoment
+            T_wheel_Nm = F_wheel_net * wheel_radius_m
+            
+            # Motor-Drehmoment Proxy
+            T_engine_Nm = T_wheel_Nm / (ratio * final_drive)
+            return T_engine_Nm
         df['engine_torque'] = df.apply(calc_engine_torque, axis=1)
         
         # Runden der RPM auf 50er Schritte zur sauberen Gruppierung
@@ -68,11 +81,11 @@ class ShiftOptimizer:
         else:
             return curve.rename(columns={'engine_torque': 'torque_smoothed'})
 
-    def calculate_ideal_shift_points(self, torque_curve_df, gear_ratios, final_drive):
+    def calculate_ideal_shift_points(self, torque_curve_df, gear_ratios, final_drive, wheel_radius_m=0.33):
         """
         Berechnet die idealen Schaltpunkte basierend auf der Zugkraftkurve.
         
-        :param torque_curve_df: DataFrame mit 'rpm_rounded' und 'torque_smoothed'
+        :param torque_curve_df: DataFrame mit 'rpm_rounded' und 'torque_smoothed' in Nm
         :param gear_ratios: Liste von Übersetzungen, z.B. [2.89, 2.10, 1.64, 1.31, 1.09, 0.93]
         :param final_drive: Achsübersetzung, z.B. 3.42
         :return: Liste mit Schaltempfehlungen (Gang N -> N+1: at RPM)
@@ -89,45 +102,39 @@ class ShiftOptimizer:
         # Feineres RPM-Array für präzise Berechnungen
         fine_rpms = np.arange(min_rpm, max_rpm, 10)
         
-        wheel_torques = []
+        wheel_forces = []
         for ratio in gear_ratios:
-            # Twheel = Tengine * Gear Ratio * Final Drive
-            wt = torque_func(fine_rpms) * ratio * final_drive
-            wheel_torques.append(wt)
+            # F_wheel = T_engine * Ratio * Final_Drive / Radius
+            # Radzugkraft (ohne Abzug von Luftwiderstand, d.h. Bruttokraft)
+            wt = torque_func(fine_rpms) * ratio * final_drive / wheel_radius_m
+            wheel_forces.append(wt)
             
         shift_points = []
         
         # Schnittpunkte zwischen Gang N und N+1 finden
         for i in range(len(gear_ratios) - 1):
-            wt_current_gear = wheel_torques[i]
+            wf_current_gear = wheel_forces[i]
             
             # Bei gleicher Geschwindigkeit (km/h) fällt die RPM im nächsten Gang ab.
-            # rpm_next_gear = rpm_current_gear * (ratio_next / ratio_current)
             ratio_next = gear_ratios[i+1]
             ratio_current = gear_ratios[i]
             
-            # Drehmomentkurve im nächsten Gang (projiziert auf die RPM des aktuellen Gangs)
             rpm_drop_factor = ratio_next / ratio_current
             rpms_in_next_gear = fine_rpms * rpm_drop_factor
-            wt_next_gear = torque_func(rpms_in_next_gear) * ratio_next * final_drive
+            wf_next_gear = torque_func(rpms_in_next_gear) * ratio_next * final_drive / wheel_radius_m
             
-            # Suche den Punkt, an dem (wt_current_gear < wt_next_gear)
-            # Wir suchen rückwärts von Max RPM, da bei niedrigen RPM der aktuelle Gang immer mehr Zugkraft hat.
             shift_rpm = max_rpm
             for j in range(len(fine_rpms)-1, 0, -1):
-                # Drehzahllimit prüfen
                 if fine_rpms[j] >= max_rpm:
                     shift_rpm = max_rpm
                     continue
                     
-                if wt_current_gear[j] > wt_next_gear[j]:
-                    # Aktueller Gang hat wieder mehr Zugkraft -> hier ist der Schnittpunkt!
+                # Weil der Luftwiderstand in beiden Gängen bei derselben Geschwindigkeit exakt gleich groß ist, 
+                # genügt der Vergleich der Brutto-Radzugkräfte (wf_current vs wf_next):
+                if wf_current_gear[j] > wf_next_gear[j]:
                     shift_rpm = fine_rpms[j]
                     break
                     
-            # Alternativ: Wenn der Schnittpunkt nie erreicht wird, schaltet man bei Max RPM
-            # (passiert oft bei modernen Rennwagen mit Leistungsabfall am Begrenzer nicht mehr,
-            # aber bei engen Getrieben schon).
             if shift_rpm == fine_rpms[0] or shift_rpm > max_rpm - 50:
                  shift_rpm = max_rpm
                  
@@ -138,7 +145,7 @@ class ShiftOptimizer:
                 'rpm_drop_to': shift_rpm * rpm_drop_factor
             })
             
-        return shift_points, fine_rpms, wheel_torques
+        return shift_points, fine_rpms, wheel_forces
 
     def get_auto_gear_ratios(self, run_id):
         """

@@ -14,22 +14,38 @@ from shift_optimizer import ShiftOptimizer
 
 st.set_page_config(page_title="LMU Analyzer", layout="wide", page_icon="🏎️")
 
-STATE_FILE = "logger_state.txt"
+def init_state_db():
+    try:
+        conn = sqlite3.connect("lmu_telemetry.db", timeout=5.0)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS logger_state (id INTEGER PRIMARY KEY, state TEXT)")
+        cursor.execute("INSERT OR IGNORE INTO logger_state (id, state) VALUES (1, 'IDLE')")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+init_state_db()
 
 def get_logger_state():
-    if not os.path.exists(STATE_FILE):
-        return "IDLE"
     try:
-        with open(STATE_FILE, "r") as f:
-            return f.read().strip()
-    except:
+        conn = sqlite3.connect("lmu_telemetry.db", timeout=5.0)
+        cursor = conn.cursor()
+        cursor.execute("SELECT state FROM logger_state WHERE id=1")
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else "IDLE"
+    except Exception:
         return "IDLE"
 
 def set_logger_state(state):
     try:
-        with open(STATE_FILE, "w") as f:
-            f.write(state)
-    except:
+        conn = sqlite3.connect("lmu_telemetry.db", timeout=5.0)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE logger_state SET state=? WHERE id=1", (state,))
+        conn.commit()
+        conn.close()
+    except Exception:
         pass
 
 DB_PATH = "lmu_telemetry.db"
@@ -266,23 +282,59 @@ with tab1:
             except:
                 st.error("Bitte überprüfe das Format der Gear Ratios.")
         
+        st.subheader("Physikalische Fahrzeug-Parameter")
+        st.info("Du musst diese Werte nicht exakt wissen. Wähle einfach die ungefähre Fahrzeugklasse aus dem Dropdown, um realistische Standardwerte für Masse und Aerodynamik zu laden. Dies reicht für hochpräzise Schaltpunkte völlig aus!")
+        
+        presets = {
+            "GTE / LM GTE": {"mass": 1245.0, "radius": 0.35, "cwa": 1.60},
+            "Hypercar (LMH / LMDh)": {"mass": 1050.0, "radius": 0.35, "cwa": 1.35},
+            "LMP2": {"mass": 930.0, "radius": 0.33, "cwa": 1.25},
+            "GT3": {"mass": 1300.0, "radius": 0.34, "cwa": 1.55},
+            "Manuelle Eingabe": {"mass": 1200.0, "radius": 0.33, "cwa": 1.50}
+        }
+        
+        # Versuche eine smarte Vorauswahl basierend auf Fahrzeugnamen, falls möglich:
+        default_idx = 0 # GTE
+        try:
+            v_name_lower = runs_df[runs_df['id'] == selected_run_id]['vehicle_name'].values[0].lower()
+            if "hypercar" in v_name_lower or "lmdh" in v_name_lower or "lmh" in v_name_lower or "toyota" in v_name_lower or "ferrari_499" in v_name_lower or "porsche_963" in v_name_lower:
+                default_idx = 1
+            elif "lmp2" in v_name_lower or "oreca" in v_name_lower:
+                default_idx = 2
+            elif "gt3" in v_name_lower:
+                default_idx = 3
+        except:
+            pass
+            
+        preset_choice = st.selectbox("Fahrzeugklasse (Preset)", list(presets.keys()), index=default_idx)
+        def_vals = presets[preset_choice]
+
+        col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+        c_mass = col_p1.number_input("Fahrzeugmasse (kg)", value=def_vals["mass"], step=10.0, help="Masse inkl. Fahrer und Kraftstoff")
+        c_radius = col_p2.number_input("Radradius (m)", value=def_vals["radius"], step=0.01, help="Statischer Radius der Reifen. GTE/LMH: ca. 0.35m")
+        c_cwa = col_p3.number_input("Luftwiderstand $C_w \\cdot A$", value=def_vals["cwa"], step=0.1, help="Widerstandsbeiwert × Stirnfläche")
+        c_rho = col_p4.number_input("Luftdichte (kg/m³)", value=1.23, step=0.01)
+
         if st.button("Schaltpunkte berechnen"):
             if not gear_ratios:
                 st.stop()
                 
-            token_curve = opt.get_torque_curve_from_run(selected_run_id, gear_ratios, final_drive_input)
+            token_curve = opt.get_torque_curve_from_run(
+                selected_run_id, gear_ratios, final_drive_input,
+                mass_kg=c_mass, wheel_radius_m=c_radius, c_w_a=c_cwa, rho=c_rho
+            )
             
             if token_curve is None or len(token_curve) < 5:
                 st.error("Nicht genug valide Daten im ausgewählten Run oder die Telemetrie ist verschlüsselt (Torque=0).")
             else:
-                st.subheader("Interpolierte Wheel Power Kurve")
+                st.subheader("Berechnetes physikalisches Motor-Drehmoment")
                 fig_engine = go.Figure()
-                fig_engine.add_trace(go.Scatter(x=token_curve['rpm_rounded'], y=token_curve['torque_smoothed'], mode='lines', name='Power Curve'))
-                fig_engine.update_layout(xaxis_title="RPM", yaxis_title="Interpolated Wheel Power (W)", template="plotly_dark")
+                fig_engine.add_trace(go.Scatter(x=token_curve['rpm_rounded'], y=token_curve['torque_smoothed'], mode='lines', name='Torque Curve', line=dict(color='#ffaa00', width=3)))
+                fig_engine.update_layout(xaxis_title="RPM", yaxis_title="Motor Drehmoment (Nm)", template="plotly_dark")
                 st.plotly_chart(fig_engine, width='stretch')
                 
                 # Berechne Schaltpunkte
-                shift_points, rpms, wheel_torques = opt.calculate_ideal_shift_points(token_curve, gear_ratios, final_drive_input)
+                shift_points, rpms, wheel_torques = opt.calculate_ideal_shift_points(token_curve, gear_ratios, final_drive_input, wheel_radius_m=c_radius)
                 
                 # Speichere die Schaltpunkte ab für das Overlay
                 import json
@@ -303,22 +355,26 @@ with tab1:
                 except Exception as e:
                     st.warning(f"Konnte Profile für Overlay nicht speichern: {e}")
                 
-                st.subheader("Zugkraft-Schnittpunkte (Wheel Torque vs Speed)")
-                st.markdown("Hier siehst du, welcher Gang bei welcher Geschwindigkeit am meisten drückt (Sägezahn-Kurve).")
+                st.subheader("Brutto Radzugkraft vs Speed (Sägezahn-Schnittpunkte)")
+                st.markdown("Hier siehst du die erzeugte Kraft am Rad in Newton. Der Schnittpunkt (Kraftverlust) erzwingt mathematisch den optimalen Schaltpunkt.")
                 fig_wheel = go.Figure()
                 
                 for i, wt in enumerate(wheel_torques):
                     # Berechne Proxy Geschwindgkeit, damit die Kurven sich auf der X-Achse überschneiden 
-                    # (RPM * Radumfang-Faktor / (Getriebe * Achse))
+                    # v_m/s = (RPM * 2 * pi / 60) * (wheel_radius) / (gear_ratio * final_drive)
+                    # v_km/h = v_m/s * 3.6
                     try:
                         ratio = gear_ratios[i]
                     except:
                         ratio = gear_ratios[-1]
                         
-                    speed_proxy = rpms * 0.12 / (ratio * final_drive_input)
+                    # Physisch korrekte Geschwindigkeit:
+                    v_mps = (rpms * 2 * np.pi / 60) * c_radius / (ratio * final_drive_input)
+                    speed_proxy = v_mps * 3.6
+                    
                     fig_wheel.add_trace(go.Scatter(x=speed_proxy, y=wt, mode='lines', name=f'Gang {i+1}'))
                 
-                fig_wheel.update_layout(xaxis_title="Geschwindigkeit (relativ) [km/h]", yaxis_title="Rad-Drehmoment (T_wheel) [Nm]", template="plotly_dark")
+                fig_wheel.update_layout(xaxis_title="Geschwindigkeit (km/h)", yaxis_title="Radzugkraft (F_wheel) [N]", template="plotly_dark")
                 st.plotly_chart(fig_wheel, width='stretch')
                 
                 st.subheader("✅ Empfohlene Schaltpunkte")
@@ -946,23 +1002,78 @@ with tab_handling:
                         lon = df_filt['lon_g'].values
                         
                         points = np.column_stack((lat, lon))
-                        
-                        # Convex Hull für das Polygon (Limit der Punkte)
+
+                        # Erzeuge ein "runderes" Limit: Punkte in Winkel-Segmente gruppieren
+                        # und pro Segment das 95. Perzentil des Radius verwenden.
                         try:
-                            hull = ConvexHull(points)
-                            hull_points = points[hull.vertices]
-                            # Polygon schließen
-                            hull_points = np.vstack((hull_points, hull_points[0]))
-                            
-                            fig.add_trace(go.Scatter(
-                                x=hull_points[:, 0], y=hull_points[:, 1],
-                                mode='lines', fill='toself', name=f"Limit {name}",
-                                line=dict(color=color, width=2),
-                                fillcolor=color_fill,
-                                opacity=0.8
-                            ))
-                        except Exception as e:
-                            pass # Falls zu wenige Punkte oder collinear
+                            # Polar-Koordinaten (theta vom x-axis, also lat)
+                            thetas = np.arctan2(lon, lat)
+                            radii = np.sqrt(lat**2 + lon**2)
+
+                            bin_deg = 5
+                            bins = int(360 / bin_deg)
+                            edges = np.linspace(-np.pi, np.pi, bins + 1)
+                            seg_points = []
+                            for i in range(len(edges) - 1):
+                                start, end = edges[i], edges[i+1]
+                                # Maske für Winkel in diesem Segment
+                                if start < end:
+                                    mask = (thetas >= start) & (thetas < end)
+                                else:
+                                    mask = (thetas >= start) | (thetas < end)
+
+                                if not np.any(mask):
+                                    continue
+
+                                r95 = np.nanpercentile(radii[mask], 95)
+                                if np.isnan(r95) or r95 <= 0:
+                                    continue
+
+                                angle_center = (start + end) / 2.0
+                                x = r95 * np.cos(angle_center)
+                                y = r95 * np.sin(angle_center)
+                                seg_points.append((angle_center, x, y))
+
+                            if len(seg_points) >= 3:
+                                # Sortiere nach Winkel und schließe das Polygon
+                                seg_points.sort(key=lambda t: t[0])
+                                hull_points = np.array([[p[1], p[2]] for p in seg_points])
+                                hull_points = np.vstack((hull_points, hull_points[0]))
+
+                                fig.add_trace(go.Scatter(
+                                    x=hull_points[:, 0], y=hull_points[:, 1],
+                                    mode='lines', fill='toself', name=f"Limit {name}",
+                                    line=dict(color=color, width=2),
+                                    fillcolor=color_fill,
+                                    opacity=0.8
+                                ))
+                            else:
+                                # Fallback auf ConvexHull falls zu wenige Segmente
+                                hull = ConvexHull(points)
+                                hull_points = points[hull.vertices]
+                                hull_points = np.vstack((hull_points, hull_points[0]))
+                                fig.add_trace(go.Scatter(
+                                    x=hull_points[:, 0], y=hull_points[:, 1],
+                                    mode='lines', fill='toself', name=f"Limit {name}",
+                                    line=dict(color=color, width=2),
+                                    fillcolor=color_fill,
+                                    opacity=0.8
+                                ))
+                        except Exception:
+                            # Falls etwas schief geht, einfach die Rohpunkte anzeigen
+                            try:
+                                hull = ConvexHull(points)
+                                hull_points = points[hull.vertices]
+                                hull_points = np.vstack((hull_points, hull_points[0]))
+                                fig.add_trace(go.Scatter(
+                                    x=hull_points[:, 0], y=hull_points[:, 1],
+                                    mode='lines', fill='toself', name=f"Limit {name}",
+                                    line=dict(color=color, width=2),
+                                    fillcolor=color_fill,
+                                    opacity=0.8
+                                ))
+                            except Exception:
+                                pass
                             
                         # Rohdaten-Punkte schwach im Hintergrund
                         fig.add_trace(go.Scatter(

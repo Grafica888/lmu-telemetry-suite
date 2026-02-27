@@ -73,6 +73,16 @@ class DataLogger:
             cursor.execute("ALTER TABLE runs ADD COLUMN notes TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+            
+        # Indexe für Performance bei großen Datensätzen
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_run_id ON telemetry_data (run_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_speed_kmh ON telemetry_data (speed_kmh)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_time_elapsed ON telemetry_data (time_elapsed)')
+
+        # In-DB State Management (statt fehleranfälliger Datei)
+        cursor.execute('CREATE TABLE IF NOT EXISTS logger_state (id INTEGER PRIMARY KEY, state TEXT)')
+        cursor.execute('INSERT OR IGNORE INTO logger_state (id, state) VALUES (1, "IDLE")')
+
         conn.commit()
         conn.close()
         
@@ -183,27 +193,35 @@ def main():
     print("Die Aufzeichnung stoppt, wenn du vom Gas gehst oder bremst.")
     print("WICHTIG: Erfordert nun den Start via Streamlit GUI (Start Button)!")
 
-    import os
-    STATE_FILE = "logger_state.txt"
-    
     def read_state():
-        if not os.path.exists(STATE_FILE):
-            try:
-                with open(STATE_FILE, "w") as f: f.write("IDLE")
-            except: pass
-            return "IDLE"
         try:
-            with open(STATE_FILE, "r") as f: return f.read().strip()
+            conn = sqlite3.connect("lmu_telemetry.db", timeout=5.0)
+            cursor = conn.cursor()
+            cursor.execute("SELECT state FROM logger_state WHERE id=1")
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] if row else "IDLE"
         except:
             return "IDLE"
 
     def write_state(s):
         try:
-            with open(STATE_FILE, "w") as f: f.write(s)
-        except: pass
+            conn = sqlite3.connect("lmu_telemetry.db", timeout=5.0)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE logger_state SET state=? WHERE id=1", (s,))
+            conn.commit()
+            conn.close()
+        except:
+            pass
 
     state_check_counter = 0
     current_cmd_state = read_state()
+
+    # EMA Filter Variablen für Noise Reduction
+    ema_alpha = 0.25  # Glättungsfaktor (0.0 bis 1.0, kleiner = stärkere Glättung)
+    ema_torque = None
+    ema_lat_g = None
+    ema_lon_g = None
 
     try:
         while True:
@@ -225,7 +243,7 @@ def main():
                 accel_z = -telemetry.mLocalAccel.z # Negativ, weil Z in rF2 nach hinten zeigt
                 
                 # Wir loggen die Beschleunigung als "Torque" Proxy, da F = m*a und Drehmoment proportional zu Kraft ist.
-                torque_proxy = accel_z * 1000 # Skaliert auf einen realistischen Wert für die Skala (z.B. Massenfaktor)
+                raw_torque_proxy = accel_z * 1000 # Skaliert auf einen realistischen Wert für die Skala (z.B. Massenfaktor)
                 
                 gear = telemetry.mGear
                 speed = telemetry.mLocalVel.z
@@ -234,15 +252,36 @@ def main():
                 brake = telemetry.mUnfilteredBrake
                 
                 # Handling & Grip Analyzer Werte:
-                lat_g = telemetry.mLocalAccel.x / 9.81
-                lon_g = -telemetry.mLocalAccel.z / 9.81 # Z points backwards
+                raw_lat_g = telemetry.mLocalAccel.x / 9.81
+                raw_lon_g = -telemetry.mLocalAccel.z / 9.81 # Z points backwards
                 steering_angle = telemetry.mUnfilteredSteering
                 lap_distance = scoring.mLapDist
                 sector = scoring.mSector
                 
+                # --- NOISE FILTERING PIPELINE (Exponential Moving Average) ---
+                if ema_torque is None:
+                    ema_torque = raw_torque_proxy
+                    ema_lat_g = raw_lat_g
+                    ema_lon_g = raw_lon_g
+                else:
+                    ema_torque = (ema_alpha * raw_torque_proxy) + ((1 - ema_alpha) * ema_torque)
+                    ema_lat_g = (ema_alpha * raw_lat_g) + ((1 - ema_alpha) * ema_lat_g)
+                    ema_lon_g = (ema_alpha * raw_lon_g) + ((1 - ema_alpha) * ema_lon_g)
+                    
+                torque_proxy = ema_torque
+                lat_g = ema_lat_g
+                lon_g = ema_lon_g
+                # -------------------------------------------------------------
+                
                 if current_cmd_state == "IDLE" or current_cmd_state == "FINISHED":
                     if logger.is_recording:
                         logger.stop_recording()
+                    
+                    # EMA Reset bei Stillstand/Ende
+                    ema_torque = None
+                    ema_lat_g = None
+                    ema_lon_g = None
+                    
                     sys.stdout.write(f"\r[Warte auf GUI] State: {current_cmd_state} | Geh ins Dashboard und druecke START!     ")
                     sys.stdout.flush()
                 
