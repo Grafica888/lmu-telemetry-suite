@@ -60,7 +60,7 @@ Dieses Tool ist in Python geschrieben. Du benötigst:
 Die Suite nutzt die bewährte rFactor 2 Shared Memory Struktur, da LMU auf derselben Engine basiert.
 
 1. Lade dir das **rFactor 2 Shared Memory Plugin** herunter (eine `.dll` Datei). Das aktuellste Plugin findest du typischerweise hier:
-   [rFactor 2 Shared Memory Map Plugin (Github)](https://github.com/TheIronWolfModding/rF2SharedMemoryMapPlugin/releases)
+   [[rFactor 2 Shared Memory Map Plugin (Github)](https://github.com/TheIronWolfModding/rF2SharedMemoryMapPlugin/releases)](https://github.com/TheIronWolfModding/rF2SharedMemoryMapPlugin)
 2. Kopiere die Datei `rFactor2SharedMemoryMapPlugin64.dll` aus dem Download.
 3. Füge die `.dll`-Datei in folgendes Verzeichnis deines Spiels ein:
    `\SteamLibrary\steamapps\common\Le Mans Ultimate\Plugins\`
