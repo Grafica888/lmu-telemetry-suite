@@ -6,7 +6,7 @@ import sqlite3
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-sys.path.append(os.path.join(os.path.dirname(__file__), 'pyRfactor2SharedMemory'))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pyRfactor2SharedMemory'))
 from sharedMemoryAPI import SimInfoAPI
 
 DB_PATH = "lmu_telemetry.db"

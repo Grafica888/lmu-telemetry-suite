@@ -57,8 +57,6 @@ def load_runs():
         conn.close()
         if not df.empty and 'run_type' not in df.columns:
             df['run_type'] = 'DRAG'
-        elif df.empty:
-            df['run_type'] = pd.Series(dtype='str')
             
         if not df.empty and 'notes' not in df.columns:
             try:
@@ -69,18 +67,161 @@ def load_runs():
             except sqlite3.OperationalError:
                 pass
             df['notes'] = ''
-        elif df.empty:
-            df['notes'] = pd.Series(dtype='str')
+            
+        if df.empty:
+            return pd.DataFrame(columns=['id', 'vehicle_name', 'vehicle_class', 'track_name', 'timestamp', 'run_type', 'notes'])
             
         return df
-    except sqlite3.OperationalError:
-        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame(columns=['id', 'vehicle_name', 'vehicle_class', 'track_name', 'timestamp', 'run_type', 'notes'])
 
 def load_telemetry(run_id):
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_sql_query(f"SELECT * FROM telemetry_data WHERE run_id = {run_id}", conn)
     conn.close()
     return df
+
+def analyze_run_quality(df):
+    if df.empty:
+        return df, 50.0, False
+        
+    # 1. Cleaning & Trimming
+    start_mask = (df['speed_kmh'] > 60) & (df['throttle'] > 0.8)
+    if start_mask.any():
+        start_idx = start_mask.idxmax()
+        df_clean = df.loc[start_idx:].copy()
+    else:
+        df_clean = df.copy()
+        
+    end_mask = df_clean['speed_kmh'] < 10
+    if end_mask.any():
+        end_idx = end_mask.idxmax()
+        df_clean = df_clean.loc[:end_idx].copy()
+        
+    if len(df_clean) < 10:
+        df_clean = df.copy()
+        
+    # A. Fake Peaks & Crash Detection
+    if 'lat_g' in df_clean.columns and 'lon_g' in df_clean.columns:
+        df_clean['lat_g_smooth'] = df_clean['lat_g'].rolling(10, min_periods=1).mean()
+        df_clean['lon_g_smooth'] = df_clean['lon_g'].rolling(10, min_periods=1).mean()
+        
+        max_safe_g = 4.0
+        max_lat = df_clean['lat_g_smooth'].abs().max()
+        max_lon = df_clean['lon_g_smooth'].abs().max()
+        crash_detected = (max_lat > max_safe_g) or (max_lon > max_safe_g)
+        
+        # Clip absurd peaks to avoid fake scores if we proceed
+        df_clean['lat_g_smooth'] = df_clean['lat_g_smooth'].clip(-max_safe_g, max_safe_g)
+        df_clean['lon_g_smooth'] = df_clean['lon_g_smooth'].clip(-max_safe_g, max_safe_g)
+    else:
+        crash_detected = False
+
+    # 3. Stability Metrics (CSI)
+    stability_score = 50.0
+    confidence_ratio = 50.0
+    counter_steer_bonus = 0.0
+    unrecoverable_spin_penalty = 0.0
+    spin_count = 0
+    max_yaw_accel = 0.0
+    
+    if 'lat_g' in df_clean.columns and 'steering_angle' in df_clean.columns:
+        # Calculate derived metrics
+        # Yaw rate approximation from lat_g and speed
+        df_clean['yaw_rate'] = df_clean.apply(lambda row: (row['lat_g'] * 9.81) / (row['speed_kmh'] / 3.6) if row['speed_kmh'] > 10 else 0, axis=1)
+        df_clean['yaw_accel'] = df_clean['yaw_rate'].diff().abs() / df_clean['time_elapsed'].diff()
+        
+        # Approximate Slip Angle: very rough proxy using steering vs actual lateral G curve
+        # A simple proxy: when steering angle changes faster than lat_g changes, or steering is opposite
+        
+        corners = df_clean[df_clean['lat_g'].abs() > 0.5]
+        if not corners.empty:
+            steering_noise = corners['steering_angle'].diff().abs().mean()
+            # Factor heuristic: steering_noise of 0.05 is bad, 0.005 is good.
+            stability_score = max(0.0, 100.0 - (steering_noise * 1000.0))
+            
+            max_yaw_accel = corners['yaw_accel'].max()
+            
+        hard_corners = df_clean[df_clean['lat_g'].abs() > 0.8]
+        if not hard_corners.empty:
+            peak_g = hard_corners['lat_g'].abs().max()
+            avg_g = hard_corners['lat_g'].abs().mean()
+            if peak_g > 0:
+                confidence_ratio = (avg_g / peak_g) * 100.0
+                
+        # Counter-steer detection
+        # lat_g is e.g., positive for left corner, negative for right corner
+        # steering is e.g., positive for left, negative for right
+        # We detect counter steer when lat_g and steering have opposite signs and both are somewhat significant
+        df_clean['is_counter_steering'] = (df_clean['lat_g'] * df_clean['steering_angle'] < 0) & (df_clean['lat_g'].abs() > 0.5) & (df_clean['steering_angle'].abs() > 0.05)
+        
+        counter_steer_events = df_clean[df_clean['is_counter_steering']]
+        
+        # For each counter steer event, check if recovered
+        # We define an event grouped by sequential frames
+        if not counter_steer_events.empty:
+            # We will use simple heuristics: scan the time after the event
+            # If speed drops > 30% without brake, or yaw accel explodes = unrecoverable
+            # Else recovered = bonus
+            indices = counter_steer_events.index.tolist()
+            # Group contiguous indices
+            event_starts = []
+            current_event = [indices[0]]
+            for i in range(1, len(indices)):
+                if indices[i] == indices[i-1] + 1:
+                    current_event.append(indices[i])
+                else:
+                    event_starts.append(current_event[0])
+                    current_event = [indices[i]]
+            event_starts.append(current_event[0])
+            
+            for start_idx in event_starts:
+                start_time = df_clean.loc[start_idx, 'time_elapsed']
+                window = df_clean[(df_clean['time_elapsed'] > start_time) & (df_clean['time_elapsed'] <= start_time + 2.0)]
+                
+                if not window.empty:
+                    max_yaw = window['yaw_rate'].abs().max()
+                    start_speed = df_clean.loc[start_idx, 'speed_kmh']
+                    min_speed = window['speed_kmh'].min()
+                    max_brake = window['throttle'].min() if 'throttle' in window.columns else 0 # proxy check if they didn't just brake
+                    # Or we just check if speed dropped 30%
+                    
+                    if max_yaw > 2.0 or (min_speed < start_speed * 0.7 and 'throttle' in window.columns and window['brake'].max() < 0.2 if 'brake' in window.columns else False):
+                        unrecoverable_spin_penalty += 10.0
+                        spin_count += 1
+                    else:
+                        counter_steer_bonus += 2.0
+
+        # Hard slip angle proxy detection (Spins)
+        # Fast rotation + speed loss
+        potential_spins = df_clean[(df_clean['yaw_rate'].abs() > 2.5) & (df_clean['speed_kmh'].diff() < -10)]
+        spin_count += len(potential_spins) // 10 # very rough grouping
+
+    # Base CSI
+    csi = (stability_score * 0.6) + (confidence_ratio * 0.4)
+    
+    # Apply Counter-steer modifiers
+    csi += min(15.0, counter_steer_bonus)  # Cap bonus at 15
+    csi -= unrecoverable_spin_penalty
+    
+    # Critical failure penalty
+    csi -= (spin_count * 5.0)
+    
+    # Yaw Accel Penalty
+    if max_yaw_accel > 5.0:
+        csi -= min(15.0, (max_yaw_accel - 5.0) * 2.0)
+        
+    csi = max(0.0, min(100.0, csi))
+    
+    # Over-Rev filter penalty
+    max_rpm = 9000
+    if 'rpm' in df_clean.columns:
+        over_rev_count = (df_clean['rpm'] > max_rpm).sum()
+        if over_rev_count > 10: # > 0.2s over rev
+            csi -= 10.0
+            csi = max(0.0, csi)
+            
+    return df_clean, csi, crash_detected
 
 def get_run_options(df):
     notes_str = df['notes'].apply(lambda x: f" | 📝 {x}" if pd.notna(x) and str(x).strip() != "" else "")
@@ -177,8 +318,9 @@ with tab_rec:
         
         # Integriertes Live-Gauge
         import sys
-        if os.path.dirname(__file__) not in sys.path:
-            sys.path.append(os.path.dirname(__file__))
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.append(current_dir)
             
         try:
             from pyRfactor2SharedMemory.sharedMemoryAPI import SimInfoAPI
@@ -574,8 +716,9 @@ with tab_shift:
             def render_quick_measure():
                 try:
                     import sys
-                    if os.path.dirname(__file__) not in sys.path:
-                        sys.path.append(os.path.dirname(__file__))
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    if current_dir not in sys.path:
+                        sys.path.append(current_dir)
                     from pyRfactor2SharedMemory.sharedMemoryAPI import SimInfoAPI
                     info = SimInfoAPI()
                     if info.isRF2running() and info.isOnTrack():
@@ -620,11 +763,14 @@ with tab_shift:
                     t0 = df_start.iloc[0]['time_elapsed']
                     df_norm = df[df['time_elapsed'] >= t0].copy()
                     df_norm['time_elapsed'] = df_norm['time_elapsed'] - t0
-                    # Berechne zurückgelegte Strecke (ds = v * dt)
-                    df_norm['distance_m'] = (df_norm['speed_kmh'] / 3.6) * df_norm['time_elapsed'].diff().fillna(0)
-                    df_norm['distance_cum'] = df_norm['distance_m'].cumsum()
-                    return df_norm
-                return df
+                else:
+                    df_norm = df.copy()
+                    
+                # Berechne zurückgelegte Strecke (ds = v * dt)
+                df_norm['distance_m'] = (df_norm['speed_kmh'] / 3.6) * df_norm['time_elapsed'].diff().fillna(0)
+                df_norm['distance_cum'] = df_norm['distance_m'].cumsum()
+                
+                return df_norm
                 
             tele_a = normalize_run(tele_a_raw, sync_speed)
             tele_b = normalize_run(tele_b_raw, sync_speed)
@@ -1206,6 +1352,7 @@ with tab_scoring:
         track_type = st.radio("Streckencharakteristik (Gewichtung):", 
                               ["High Speed (z.B. Le Mans - Power & Aero)", 
                                "Technical (z.B. Imola - Grip & Accel)", 
+                               "Endurance / Race Pace (Fokus auf Konsistenz)",
                                "Balanced (Standard)"], horizontal=True)
                                
         if st.button("🏆 Performance Score berechnen", type="primary", width='stretch'):
@@ -1227,6 +1374,7 @@ with tab_scoring:
             # Helper funcs
             def get_drag_metrics_for_run(rid):
                 t = load_telemetry(rid)
+                t, _, _ = analyze_run_quality(t)
                 if t.empty: return None, None, None
                 t_100 = t[t['speed_kmh'] >= 100]
                 t_200 = t[t['speed_kmh'] >= 200]
@@ -1236,17 +1384,26 @@ with tab_scoring:
                 
             def get_handling_metrics_for_run(rid):
                 t = load_telemetry(rid)
-                if t.empty or 'lat_g' not in t.columns: return None, None
-                lat = t['lat_g'].abs().max()
-                brake = t['lon_g'].min()
-                return lat if lat > 0 else None, abs(brake) if brake < 0 else None
+                t, csi, crash = analyze_run_quality(t)
+                if t.empty or 'lat_g' not in t.columns: return None, None, 50.0, False
+                lat_col = 'lat_g_smooth' if 'lat_g_smooth' in t.columns else 'lat_g'
+                lon_col = 'lon_g_smooth' if 'lon_g_smooth' in t.columns else 'lon_g'
+                lat = t[lat_col].abs().max()
+                brake = t[lon_col].min()
+                return lat if lat > 0 else None, abs(brake) if brake < 0 else None, csi, crash
                 
             with st.spinner("Scanne Datenbank nach globalen Bestwerten (für das 100er Score-Rating)..."):
                 a_100, a_200, a_vmax = get_drag_metrics_for_run(run_a_drag_id)
                 b_100, b_200, b_vmax = get_drag_metrics_for_run(run_b_drag_id)
                 
-                a_lat, a_brk = get_handling_metrics_for_run(run_a_hand_id)
-                b_lat, b_brk = get_handling_metrics_for_run(run_b_hand_id)
+                a_lat, a_brk, a_csi, a_crash = get_handling_metrics_for_run(run_a_hand_id)
+                b_lat, b_brk, b_csi, b_crash = get_handling_metrics_for_run(run_b_hand_id)
+                
+                # Show Crash Warnings
+                if a_crash:
+                    st.error(f"⚠️ **Crash/Impact detected** im Handling-Run von Fahrzeug A ({car_a_name})! (Extreme G-Kräfte > 4.0G). Peaks wurden gecleant, aber die Daten könnten verfälscht sein.")
+                if b_crash:
+                    st.error(f"⚠️ **Crash/Impact detected** im Handling-Run von Fahrzeug B ({car_b_name})! (Extreme G-Kräfte > 4.0G). Peaks wurden gecleant, aber die Daten könnten verfälscht sein.")
                 
                 # Globale Bestwerte (alle Autos in der Datenbank)
                 global_best_100, global_best_200 = 999.0, 999.0
@@ -1259,7 +1416,7 @@ with tab_scoring:
                     if c_vmax and c_vmax > global_best_vmax: global_best_vmax = c_vmax
                     
                 for rid in handling_runs['id'].values:
-                    c_lat, c_brk = get_handling_metrics_for_run(rid)
+                    c_lat, c_brk, _, _ = get_handling_metrics_for_run(rid)
                     if c_lat and c_lat > global_best_lat: global_best_lat = c_lat
                     if c_brk and c_brk > global_best_brk: global_best_brk = c_brk
                     
@@ -1284,7 +1441,8 @@ with tab_scoring:
                     "Accel High (0-200)": calc_score_lower_better(a_200, global_best_200),
                     "Top Speed": calc_score_higher_better(a_vmax, global_best_vmax),
                     "Kurvengrip (Lat G)": calc_score_higher_better(a_lat, global_best_lat),
-                    "Bremskraft": calc_score_higher_better(a_brk, global_best_brk)
+                    "Bremskraft": calc_score_higher_better(a_brk, global_best_brk),
+                    "Konsistenz / Stabilität": a_csi
                 }
                 
                 scores_b = {
@@ -1292,16 +1450,19 @@ with tab_scoring:
                     "Accel High (0-200)": calc_score_lower_better(b_200, global_best_200),
                     "Top Speed": calc_score_higher_better(b_vmax, global_best_vmax),
                     "Kurvengrip (Lat G)": calc_score_higher_better(b_lat, global_best_lat),
-                    "Bremskraft": calc_score_higher_better(b_brk, global_best_brk)
+                    "Bremskraft": calc_score_higher_better(b_brk, global_best_brk),
+                    "Konsistenz / Stabilität": b_csi
                 }
                 
                 # Weightings
                 if "High Speed" in track_type:
-                    w = [0.10, 0.20, 0.50, 0.10, 0.10]
+                    w = [0.10, 0.20, 0.40, 0.10, 0.10, 0.10]
                 elif "Technical" in track_type:
-                    w = [0.25, 0.15, 0.10, 0.30, 0.20]
+                    w = [0.20, 0.15, 0.10, 0.30, 0.15, 0.10]
+                elif "Endurance" in track_type:
+                    w = [0.05, 0.10, 0.15, 0.10, 0.10, 0.50]
                 else:
-                    w = [0.20, 0.20, 0.20, 0.20, 0.20]
+                    w = [0.15, 0.15, 0.15, 0.20, 0.15, 0.20]
                     
                 keys = list(scores_a.keys())
                 
@@ -1360,30 +1521,18 @@ with tab_scoring:
                     color_a = "color: #00ff88; font-weight: bold;" if safe_a == best and val_a is not None else "color: #ffffff;"
                     color_b = "color: #00ff88; font-weight: bold;" if safe_b == best and val_b is not None else "color: #ffffff;"
                     
-                    return f'''
-                    <tr style="border-bottom: 1px solid #333; background-color: rgba(255,255,255,0.02);">
-                        <td style="padding: 12px 16px;">{label}</td>
-                        <td style="padding: 12px 16px; {color_a}">{str_a}</td>
-                        <td style="padding: 12px 16px; {color_b}">{str_b}</td>
-                    </tr>
-                    '''
+                    return f'<tr style="border-bottom: 1px solid #333; background-color: rgba(255,255,255,0.02);"><td style="padding: 12px 16px;">{label}</td><td style="padding: 12px 16px; {color_a}">{str_a}</td><td style="padding: 12px 16px; {color_b}">{str_b}</td></tr>'
                 
-                html = f'''
-                <table style="width: 100%; text-align: left; border-collapse: collapse; margin-top: 10px; font-family: sans-serif;">
-                    <thead>
-                        <tr style="border-bottom: 2px solid #555; background-color: rgba(255,255,255,0.05);">
-                            <th style="padding: 12px 16px; color: #aaa;">Metrik</th>
-                            <th style="padding: 12px 16px; color: #00ff88;">{car_a_name}</th>
-                            <th style="padding: 12px 16px; color: #ff0055;">{car_b_name}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {render_row("0-100 km/h", a_100, b_100, "{:.2f} s", True)}
-                        {render_row("0-200 km/h", a_200, b_200, "{:.2f} s", True)}
-                        {render_row("Top Speed", a_vmax, b_vmax, "{:.1f} km/h", False)}
-                        {render_row("Max Lateral G", a_lat, b_lat, "{:.2f} G", False)}
-                        {render_row("Max Brake G", a_brk, b_brk, "{:.2f} G", False)}
-                    </tbody>
-                </table>
-                '''
+                html = (
+                    f'<table style="width: 100%; text-align: left; border-collapse: collapse; margin-top: 10px; font-family: sans-serif;">'
+                    f'<thead><tr style="border-bottom: 2px solid #555; background-color: rgba(255,255,255,0.05);"><th style="padding: 12px 16px; color: #aaa;">Metrik</th>'
+                    f'<th style="padding: 12px 16px; color: #00ff88;">{car_a_name}</th><th style="padding: 12px 16px; color: #ff0055;">{car_b_name}</th></tr></thead><tbody>'
+                    f'{render_row("0-100 km/h", a_100, b_100, "{:.2f} s", True)}'
+                    f'{render_row("0-200 km/h", a_200, b_200, "{:.2f} s", True)}'
+                    f'{render_row("Top Speed", a_vmax, b_vmax, "{:.1f} km/h", False)}'
+                    f'{render_row("Max Lateral G (Clean)", a_lat, b_lat, "{:.2f} G", False)}'
+                    f'{render_row("Max Brake G (Clean)", a_brk, b_brk, "{:.2f} G", False)}'
+                    f'{render_row("Stability & Confidence (CSI)", a_csi, b_csi, "{:.1f} Pkt", False)}'
+                    f'</tbody></table>'
+                )
                 st.markdown(html, unsafe_allow_html=True)
