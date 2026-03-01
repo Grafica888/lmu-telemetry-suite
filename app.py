@@ -231,8 +231,38 @@ runs_df = load_runs()
 
 st.title("🏎️ LMU Performance & Telemetry Analyzer")
 
-tab_rec, tab1, tab2, tab_shift, tab_handling, tab_scoring, tab3 = st.tabs(["🔴 Live Aufzeichnung", "⚙️ Shift Point", "⏱️ Drag Benchmarker", "🚀 Shift Analyzer", "🏎️ Handling & Grip", "🏆 Scoring", "🗑️ Logs"])
 
+if 'car_a_name' not in st.session_state:
+    st.session_state.car_a_name = None
+if 'car_b_name' not in st.session_state:
+    st.session_state.car_b_name = None
+
+def get_default_run_index(options_list, target_vehicle_name):
+    if not target_vehicle_name: return 0
+    for i, opt in enumerate(options_list):
+        if target_vehicle_name in opt: return i
+    return 0
+
+def on_car_change(key_a, key_b, df):
+    if key_a in st.session_state:
+        val = st.session_state[key_a]
+        run_id = int(val.split(" - ")[0])
+        vname = df[df['id'] == run_id]['vehicle_name'].values[0]
+        st.session_state.car_a_name = vname
+    if key_b in st.session_state:
+        val = st.session_state[key_b]
+        run_id = int(val.split(" - ")[0])
+        vname = df[df['id'] == run_id]['vehicle_name'].values[0]
+        st.session_state.car_b_name = vname
+
+
+tab_rec, tab_laengs, tab_quer, tab_score, tab_garage = st.tabs([
+    "🏁 Aufnahme", 
+    "🚀 Längsdynamik", 
+    "🏎️ Querdynamik", 
+    "⚖️ Gesamt-Vergleich", 
+    "📂 Garage"
+])
 with tab_rec:
     # Platzhalter für dynamische Inhalte
     status_placeholder = st.empty()
@@ -382,717 +412,526 @@ with tab_rec:
                 fig_gauge.update_layout(height=280, margin=dict(l=20, r=20, t=10, b=10), template="plotly_dark")
                 speed_placeholder.plotly_chart(fig_gauge, width='stretch')
 
-with tab1:
-    st.header("Shift Point Optimizer")
-    st.markdown("Berechne den perfekten Schaltpunkt pro Gang basierend auf den Engine-Torque-Kurven.")
+
+with tab_laengs:
+    st.header("🚀 Längsdynamik (Motor, Drag, Schalten, Optimierung)")
     
-    drag_runs = runs_df[runs_df['run_type'] == 'DRAG']
-    
-    if drag_runs.empty:
-        st.warning("Keine Drag-Telemetrie-Daten gefunden. Bitte zuerst mit `data_logger.py` aufzeichnen!")
-    else:
-        run_options = get_run_options(drag_runs)
-        selected_run_str = st.selectbox("Wähle einen Telemetrie-Run aus", run_options)
-        
-        selected_run_id = int(selected_run_str.split(" - ")[0])
-        
-        st.subheader("Getriebe-Daten & Übersetzung")
-        detection_mode = st.radio("Gear Ratio Detection Mode", ["Auto-Detect aus Telemetrie (Empfohlen)", "Manuelle Eingabe"])
-        
-        gear_ratios = []
-        final_drive_input = 1.0
-        opt = ShiftOptimizer(DB_PATH)
-        
-        if detection_mode == "Auto-Detect aus Telemetrie (Empfohlen)":
-            st.info("Das Tool berechnet das Verhältnis von Speed zu RPM basierend auf den Log-Daten des Autos automatisch und normiert die Kurven.")
-            detected_r_values = opt.get_auto_gear_ratios(selected_run_id)
-            if not detected_r_values:
-                st.warning("Noch nicht genügend Telemetrie vorhanden (oder keine Volllast-Sektionen > 0.9 Throttle), um die Gänge automatisch zu erkennen. Bitte wechsle zur manuellen Eingabe.")
-            else:
-                formatted_rs = ", ".join([f"G{i+1}: {r:.4f}" for i, r in enumerate(detected_r_values)])
-                st.success(f"Erkannte Speed/RPM Ratio pro Gang: {formatted_rs}")
-                # Mathematische Normierung: Ratio = 0.12 / R-Wert (entspricht dem alten Proxy in der Visualisierung)
-                gear_ratios = [0.12 / r for r in detected_r_values]
-                final_drive_input = 1.0 # Base factor
-                
-        else:
-            col1, col2 = st.columns(2)
-            ratios_input = col1.text_input("Gear Ratios (kommagetrennt, z.B. 2.50, 1.90, 1.45, 1.20, 1.0, 0.85)", "2.50, 1.90, 1.45, 1.20, 1.0, 0.85")
-            final_drive_input = col2.number_input("Final Drive Ratio", value=3.40, step=0.1)
-            try:
-                gear_ratios = [float(r.strip()) for r in ratios_input.split(',')]
-            except:
-                st.error("Bitte überprüfe das Format der Gear Ratios.")
-        
-        st.subheader("Physikalische Fahrzeug-Parameter")
-        st.info("Du musst diese Werte nicht exakt wissen. Wähle einfach die ungefähre Fahrzeugklasse aus dem Dropdown, um realistische Standardwerte für Masse und Aerodynamik zu laden. Dies reicht für hochpräzise Schaltpunkte völlig aus!")
-        
-        presets = {
-            "GTE / LM GTE": {"mass": 1245.0, "radius": 0.35, "cwa": 1.60},
-            "Hypercar (LMH / LMDh)": {"mass": 1050.0, "radius": 0.35, "cwa": 1.35},
-            "LMP2": {"mass": 930.0, "radius": 0.33, "cwa": 1.25},
-            "GT3": {"mass": 1300.0, "radius": 0.34, "cwa": 1.55},
-            "Manuelle Eingabe": {"mass": 1200.0, "radius": 0.33, "cwa": 1.50}
-        }
-        
-        # Versuche eine smarte Vorauswahl basierend auf Fahrzeugnamen, falls möglich:
-        default_idx = 0 # GTE
-        try:
-            v_name_lower = runs_df[runs_df['id'] == selected_run_id]['vehicle_name'].values[0].lower()
-            if "hypercar" in v_name_lower or "lmdh" in v_name_lower or "lmh" in v_name_lower or "toyota" in v_name_lower or "ferrari_499" in v_name_lower or "porsche_963" in v_name_lower:
-                default_idx = 1
-            elif "lmp2" in v_name_lower or "oreca" in v_name_lower:
-                default_idx = 2
-            elif "gt3" in v_name_lower:
-                default_idx = 3
-        except:
-            pass
-            
-        preset_choice = st.selectbox("Fahrzeugklasse (Preset)", list(presets.keys()), index=default_idx)
-        def_vals = presets[preset_choice]
-
-        col_p1, col_p2, col_p3, col_p4 = st.columns(4)
-        c_mass = col_p1.number_input("Fahrzeugmasse (kg)", value=def_vals["mass"], step=10.0, help="Masse inkl. Fahrer und Kraftstoff")
-        c_radius = col_p2.number_input("Radradius (m)", value=def_vals["radius"], step=0.01, help="Statischer Radius der Reifen. GTE/LMH: ca. 0.35m")
-        c_cwa = col_p3.number_input("Luftwiderstand $C_w \\cdot A$", value=def_vals["cwa"], step=0.1, help="Widerstandsbeiwert × Stirnfläche")
-        c_rho = col_p4.number_input("Luftdichte (kg/m³)", value=1.23, step=0.01)
-
-        if st.button("Schaltpunkte berechnen"):
-            if not gear_ratios:
-                st.stop()
-                
-            token_curve = opt.get_torque_curve_from_run(
-                selected_run_id, gear_ratios, final_drive_input,
-                mass_kg=c_mass, wheel_radius_m=c_radius, c_w_a=c_cwa, rho=c_rho
-            )
-            
-            if token_curve is None or len(token_curve) < 5:
-                st.error("Nicht genug valide Daten im ausgewählten Run oder die Telemetrie ist verschlüsselt (Torque=0).")
-            else:
-                st.subheader("Berechnetes physikalisches Motor-Drehmoment")
-                fig_engine = go.Figure()
-                fig_engine.add_trace(go.Scatter(x=token_curve['rpm_rounded'], y=token_curve['torque_smoothed'], mode='lines', name='Torque Curve', line=dict(color='#ffaa00', width=3)))
-                fig_engine.update_layout(xaxis_title="RPM", yaxis_title="Motor Drehmoment (Nm)", template="plotly_dark")
-                st.plotly_chart(fig_engine, width='stretch')
-                
-                # Berechne Schaltpunkte
-                shift_points, rpms, wheel_torques = opt.calculate_ideal_shift_points(token_curve, gear_ratios, final_drive_input, wheel_radius_m=c_radius)
-                
-                # Speichere die Schaltpunkte ab für das Overlay
-                import json
-                try:
-                    conn_sp = sqlite3.connect(DB_PATH)
-                    cursor_sp = conn_sp.cursor()
-                    cursor_sp.execute('CREATE TABLE IF NOT EXISTS saved_profiles (run_id INTEGER PRIMARY KEY, vehicle_name TEXT, shift_points_json TEXT)')
-                    
-                    # Hole Fahrzeugnamen
-                    v_name = runs_df[runs_df['id'] == selected_run_id]['vehicle_name'].values[0]
-                    
-                    cursor_sp.execute('''
-                        INSERT OR REPLACE INTO saved_profiles (run_id, vehicle_name, shift_points_json) 
-                        VALUES (?, ?, ?)
-                    ''', (selected_run_id, v_name, json.dumps(shift_points)))
-                    conn_sp.commit()
-                    conn_sp.close()
-                except Exception as e:
-                    st.warning(f"Konnte Profile für Overlay nicht speichern: {e}")
-                
-                st.subheader("Brutto Radzugkraft vs Speed (Sägezahn-Schnittpunkte)")
-                st.markdown("Hier siehst du die erzeugte Kraft am Rad in Newton. Der Schnittpunkt (Kraftverlust) erzwingt mathematisch den optimalen Schaltpunkt.")
-                fig_wheel = go.Figure()
-                
-                for i, wt in enumerate(wheel_torques):
-                    # Berechne Proxy Geschwindgkeit, damit die Kurven sich auf der X-Achse überschneiden 
-                    # v_m/s = (RPM * 2 * pi / 60) * (wheel_radius) / (gear_ratio * final_drive)
-                    # v_km/h = v_m/s * 3.6
-                    try:
-                        ratio = gear_ratios[i]
-                    except:
-                        ratio = gear_ratios[-1]
-                        
-                    # Physisch korrekte Geschwindigkeit:
-                    v_mps = (rpms * 2 * np.pi / 60) * c_radius / (ratio * final_drive_input)
-                    speed_proxy = v_mps * 3.6
-                    
-                    fig_wheel.add_trace(go.Scatter(x=speed_proxy, y=wt, mode='lines', name=f'Gang {i+1}'))
-                
-                fig_wheel.update_layout(xaxis_title="Geschwindigkeit (km/h)", yaxis_title="Radzugkraft (F_wheel) [N]", template="plotly_dark")
-                st.plotly_chart(fig_wheel, width='stretch')
-                
-                st.subheader("✅ Empfohlene Schaltpunkte")
-                for sp in shift_points:
-                    st.success(f"Schalte **Gang {sp['from_gear']} ➡️ {sp['to_gear']}** bei **{sp['shift_rpm']:.0f} RPM** (RPM fällt auf ca. {sp['rpm_drop_to']:.0f})")
-
-with tab2:
-    st.header("Vehicle Benchmarker")
-    st.markdown("Vergleiche Beschleunigungszeiten und Vmax zwischen Fahrzeugen/Setups.")
-    
-    drag_runs = runs_df[runs_df['run_type'] == 'DRAG']
-    
-    if drag_runs.empty:
-        st.warning("Keine Drag-Daten zum Vergleichen vorhanden.")
-    else:
-        run_options = get_run_options(drag_runs)
-        
-        col1, col2 = st.columns(2)
-        car_a_str = col1.selectbox("Fahrzeug/Setup A", run_options, key="car_a_bench")
-        car_b_str = col2.selectbox("Fahrzeug/Setup B", run_options, key="car_b_bench")
-        
-        run_a_id = int(car_a_str.split(" - ")[0])
-        run_b_id = int(car_b_str.split(" - ")[0])
-        
-        mode = st.radio("Analyse-Modus:", ["Original-Telemetrie (Rohdaten)", "Virtual Best-Run (Mathematisch korrigiert)"], 
-                        help="Virtual Best-Run berechnet die Zeiten iterativ anhand der maximalen Beschleunigungskraft pro km/h ('Envelope'). Verlorene Zeit im Begrenzer ('Treppchen') wird mathematisch gelöscht und Schaltvorgänge auf 0.08s standardisiert. Dies ist der Goldstandard für reine Performance-Vergleiche!")
-        use_virtual_run = "Virtual Best-Run" in mode
-        
-        st.number_input("Speed-Trigger für Synchronisation (km/h)", min_value=1, max_value=200, value=50, step=5, key="sync_speed_bench", help="Die Läufe werden exakt an dem Punkt ausgerichtet (Zeit=0), an dem sie diese Geschwindigkeit überschreiten. Ein Wert > 50 km/h eliminiert Fehler durch Schlupf oder unterschiedliche Reaktionszeiten am Start.")
-        
-        if st.button("Vergleich Starten"):
-            tele_a = load_telemetry(run_a_id)
-            tele_b = load_telemetry(run_b_id)
-            sync_speed_bench_val = st.session_state.sync_speed_bench
-            
-            if use_virtual_run:
-                def generate_virtual_run(df):
-                    df_valid = df[df['torque'] > 0].copy()
-                    if df_valid.empty: return df
-                    
-                    df_valid['speed_bin'] = df_valid['speed_kmh'].round()
-                    envelope = df_valid.groupby('speed_bin')['torque'].quantile(0.95).reset_index()
-                    if len(envelope) < 5: return df
-                    
-                    min_bin = int(envelope['speed_bin'].min())
-                    max_bin = int(envelope['speed_bin'].max())
-                    envelope = envelope.set_index('speed_bin').reindex(range(min_bin, max_bin + 1)).interpolate(method='linear').reset_index()
-                    
-                    start_speed = max(0.0, df['speed_kmh'].iloc[0])
-                    max_speed = df['speed_kmh'].max()
-                    
-                    accels_m_s2 = np.maximum(envelope['torque'].values / 1000.0, 0.05)
-                    accel_interp = interp1d(envelope['speed_bin'].values, accels_m_s2, kind='linear', fill_value="extrapolate")
-                    
-                    sim_speeds = np.arange(start_speed, max_speed, 0.1)
-                    sim_times = []
-                    current_time = df['time_elapsed'].iloc[0]
-                    
-                    shift_speeds = []
-                    last_gear = df_valid['gear'].iloc[0]
-                    for i in range(1, len(df_valid)):
-                        if df_valid['gear'].iloc[i] > last_gear:
-                            shift_speeds.append(df_valid['speed_kmh'].iloc[i])
-                            last_gear = df_valid['gear'].iloc[i]
-                            
-                    shift_delay = 0.08
-                    shifts_applied = sum(1 for s in shift_speeds if s < start_speed)
-                    
-                    for v in sim_speeds:
-                        a = accel_interp(v)
-                        if a < 0.05: a = 0.05
-                        dt = (0.1 / 3.6) / a
-                        
-                        while shifts_applied < len(shift_speeds) and v >= shift_speeds[shifts_applied]:
-                            current_time += shift_delay
-                            shifts_applied += 1
-                            
-                        current_time += dt
-                        sim_times.append(current_time)
-                        
-                    return pd.DataFrame({
-                        'time_elapsed': sim_times,
-                        'speed_kmh': sim_speeds
-                    })
-                
-                tele_a = generate_virtual_run(tele_a)
-                tele_b = generate_virtual_run(tele_b)
-            
-            def normalize_bench_run(df, target_sync_speed):
-                df_start = df[df['speed_kmh'] >= target_sync_speed]
-                if not df_start.empty:
-                    t0 = df_start.iloc[0]['time_elapsed']
-                    df_norm = df[df['time_elapsed'] >= t0].copy()
-                    df_norm['time_elapsed'] = df_norm['time_elapsed'] - t0
-                    return df_norm
-                return df
-
-            tele_a = normalize_bench_run(tele_a, sync_speed_bench_val)
-            tele_b = normalize_bench_run(tele_b, sync_speed_bench_val)
-
-            def calculate_0_to_x(df, target_speed):
-                filtered = df[df['speed_kmh'] >= target_speed]
-                if filtered.empty:
-                    return None
-                return filtered.iloc[0]['time_elapsed'] - df.iloc[0]['time_elapsed']
-
-            metrics_a = {
-                f"{sync_speed_bench_val}-100 km/h": calculate_0_to_x(tele_a, 100),
-                f"{sync_speed_bench_val}-200 km/h": calculate_0_to_x(tele_a, 200),
-                f"{sync_speed_bench_val}-300 km/h": calculate_0_to_x(tele_a, 300),
-                "Vmax": tele_a['speed_kmh'].max()
-            }
-            
-            metrics_b = {
-                f"{sync_speed_bench_val}-100 km/h": calculate_0_to_x(tele_b, 100),
-                f"{sync_speed_bench_val}-200 km/h": calculate_0_to_x(tele_b, 200),
-                f"{sync_speed_bench_val}-300 km/h": calculate_0_to_x(tele_b, 300),
-                "Vmax": tele_b['speed_kmh'].max()
-            }
-            
-            st.subheader("📊 Performance KPIs")
-            
-            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-            
-            def render_metric(col, label, key):
-                val_a = metrics_a[key]
-                val_b = metrics_b[key]
-                
-                if val_a is None: val_a_str = "N/A"
-                elif key == "Vmax": val_a_str = f"{val_a:.1f} km/h"
-                else: val_a_str = f"{val_a:.2f} s"
-                
-                if val_a is not None and val_b is not None:
-                    delta = val_a - val_b
-                    # Für Vmax ist positiv besser, für Beschleunigung ist negativ besser
-                    if key == "Vmax":
-                        delta_str = f"{delta:+.1f} km/h (A vs B)"
-                        color = "normal" if delta == 0 else "inverse"  # invert colors natively in streamlit is tricky, let's just show string
-                    else:
-                        delta_str = f"{delta:+.2f} s (A vs B)"
-                else:
-                    delta_str = "N/A"
-                    
-                col.metric(label=f"A: {label}", value=val_a_str, delta=delta_str, delta_color="inverse" if key != "Vmax" else "normal")
-            
-            render_metric(m_col1, f"{sync_speed_bench_val}-100 km/h", f"{sync_speed_bench_val}-100 km/h")
-            render_metric(m_col2, f"{sync_speed_bench_val}-200 km/h", f"{sync_speed_bench_val}-200 km/h")
-            render_metric(m_col3, f"{sync_speed_bench_val}-300 km/h", f"{sync_speed_bench_val}-300 km/h")
-            render_metric(m_col4, "Vmax", "Vmax")
-            
-            st.subheader("Geschwindigkeit über Zeit / Speed-Curve Overlay")
-            
-            # Beschneide die längere Linie auf die Zeit der kürzeren Linie für einen optisch fairen Vergleich
-            max_plot_time = min(tele_a['time_elapsed'].max(), tele_b['time_elapsed'].max())
-            tele_a_plot = tele_a[tele_a['time_elapsed'] <= max_plot_time]
-            tele_b_plot = tele_b[tele_b['time_elapsed'] <= max_plot_time]
-            
-            fig_speed = go.Figure()
-            fig_speed.add_trace(go.Scatter(x=tele_a_plot['time_elapsed'], y=tele_a_plot['speed_kmh'], name=f"A: {car_a_str.split(' - ')[1]}", mode='lines', line=dict(color='#00ff88')))
-            fig_speed.add_trace(go.Scatter(x=tele_b_plot['time_elapsed'], y=tele_b_plot['speed_kmh'], name=f"B: {car_b_str.split(' - ')[1]}", mode='lines', line=dict(color='#ff0055')))
-            
-            fig_speed.update_layout(xaxis_title="Time (s)", yaxis_title="Speed (km/h)", template="plotly_dark")
-            st.plotly_chart(fig_speed, width='stretch')
-
-with tab_shift:
-    st.header("Drag & Shift Performance Analyzer")
-    st.markdown("Vergleiche zwei Beschleunigungsfahrten hochpräzise. Analysiere Schaltlatenzen, RPM Tipps und finde heraus, welches Auto oder Setup auf der Geraden dominiert.")
-    
-    # Quick Record UI for Shift Analyzer
-    scol1, scol2 = st.columns([2, 1])
-    
-    with scol1:
-        st.subheader("⏱️ Live Quick-Record")
-        st.caption("Nimm Drag-Läufe separat von der Haupt-DB direkt hier auf ('Quick_Shift').")
-        q_col1, q_col2, q_col3 = st.columns(3)
-        shift_state = get_logger_state()
-        
-        with q_col1:
-            if st.button("🚀 Quick Record Auto A", type="primary" if not shift_state.startswith("ARMED") else "secondary", width='stretch', disabled=shift_state.startswith("ARMED") or shift_state.startswith("RECORDING")):
-                set_logger_state("ARMED_QUICK_SHIFT_A")
-                st.rerun()
-        with q_col2:
-            if st.button("🚀 Quick Record Auto B", type="primary" if not shift_state.startswith("ARMED") else "secondary", width='stretch', disabled=shift_state.startswith("ARMED") or shift_state.startswith("RECORDING")):
-                set_logger_state("ARMED_QUICK_SHIFT_B")
-                st.rerun()
-        with q_col3:
-            if st.button("⏹️ Stopp / Abbrechen", width='stretch', disabled=shift_state == "IDLE" or shift_state == "FINISHED"):
-                set_logger_state("FINISHED")
-                st.rerun()
-                
-    with scol2:
-        st.info(f"**Status:** {shift_state}")
-        # Kleines Speedometer (wird nur aktualisiert wenn wir auf der Shift page sind und manuell togglen)
-        s_update_live = st.toggle("Live Telemetrie Update", value=shift_state.startswith("ARMED") or shift_state.startswith("RECORDING"), key="shift_live_tog")
-        if s_update_live:
-            @st.fragment(run_every=0.5)
-            def render_quick_measure():
-                try:
-                    import sys
-                    current_dir = os.path.dirname(os.path.abspath(__file__))
-                    if current_dir not in sys.path:
-                        sys.path.append(current_dir)
-                    from pyRfactor2SharedMemory.sharedMemoryAPI import SimInfoAPI
-                    info = SimInfoAPI()
-                    if info.isRF2running() and info.isOnTrack():
-                        t = info.playersVehicleTelemetry()
-                        st.metric("Live Speed", f"{abs(t.mLocalVel.z) * 3.6:.1f} km/h", f"RPM: {t.mEngineRPM:.0f}")
-                    else:
-                        st.metric("Live Speed", "0.0 km/h", "Waiting for track...")
-                except:
-                    pass
-            render_quick_measure()
-        else:
-            st.metric("Live Speed", "--- km/h", "Offline")
-
-    st.markdown("---")
-    
-    # Load Runs for Analysis (Include both Drag and Temporary Quick_Shifts)
     drag_runs = runs_df[(runs_df['run_type'] == 'DRAG') | (runs_df['run_type'].str.startswith('QUICK_SHIFT'))]
     
     if drag_runs.empty:
         st.warning("Keine Drag-Daten zum Vergleichen vorhanden.")
     else:
-        run_options = get_run_options(drag_runs)
+        run_options = get_run_options(drag_runs).tolist()
         
         col1, col2 = st.columns(2)
-        car_a_str = col1.selectbox("Fahrzeug/Setup A (Referenz)", run_options, key="car_a")
-        car_b_str = col2.selectbox("Fahrzeug/Setup B (Vergleich)", run_options, key="car_b")
+        idx_a = get_default_run_index(run_options, st.session_state.car_a_name)
+        car_a_str = col1.selectbox("Fahrzeug/Setup A (Referenz)", run_options, index=idx_a, key="laengs_car_a", on_change=on_car_change, args=("laengs_car_a", "laengs_car_b", drag_runs))
+        
+        idx_b = get_default_run_index(run_options, st.session_state.car_b_name)
+        if idx_b == 0 and len(run_options) > 1: idx_b = 1
+        car_b_str = col2.selectbox("Fahrzeug/Setup B (Vergleich)", run_options, index=idx_b, key="laengs_car_b", on_change=on_car_change, args=("laengs_car_a", "laengs_car_b", drag_runs))
         
         run_a_id = int(car_a_str.split(" - ")[0])
         run_b_id = int(car_b_str.split(" - ")[0])
         
-        st.number_input("Speed-Trigger für Synchronisation (km/h)", min_value=1, max_value=200, value=50, step=5, key="sync_speed", help="Die Läufe werden exakt an dem Punkt ausgerichtet (Zeit=0), an dem sie diese Geschwindigkeit überschreiten. Ein Wert > 50 km/h eliminiert Fehler durch Schlupf oder unterschiedliche Reaktionszeiten am Start.")
-        
-        if st.button("🏁 Analyse Starten", type="primary", width='stretch'):
-            tele_a_raw = load_telemetry(run_a_id)
-            tele_b_raw = load_telemetry(run_b_id)
-            
-            sync_speed = st.session_state.sync_speed
-            
-            def normalize_run(df, target_sync_speed):
-                df_start = df[df['speed_kmh'] >= target_sync_speed]
-                if not df_start.empty:
-                    t0 = df_start.iloc[0]['time_elapsed']
-                    df_norm = df[df['time_elapsed'] >= t0].copy()
-                    df_norm['time_elapsed'] = df_norm['time_elapsed'] - t0
-                else:
-                    df_norm = df.copy()
-                    
-                # Berechne zurückgelegte Strecke (ds = v * dt)
-                df_norm['distance_m'] = (df_norm['speed_kmh'] / 3.6) * df_norm['time_elapsed'].diff().fillna(0)
-                df_norm['distance_cum'] = df_norm['distance_m'].cumsum()
-                
-                return df_norm
-                
-            tele_a = normalize_run(tele_a_raw, sync_speed)
-            tele_b = normalize_run(tele_b_raw, sync_speed)
-            
-            def extract_shift_metrics(df):
-                metrics = []
-                # Shift detection: changing gear
-                df = df.reset_index(drop=True)
-                gear_changes = df[df['gear'].diff() > 0]
-                
-                for idx, row in gear_changes.iterrows():
-                    if idx == 0: continue
-                    gear_from = df.loc[idx-1, 'gear']
-                    gear_to = row['gear']
-                    shift_time = row['time_elapsed']
-                    
-                    # Window +/- 0.4s
-                    window = df[(df['time_elapsed'] >= shift_time - 0.4) & (df['time_elapsed'] <= shift_time + 0.4)]
-                    if window.empty: continue
-                    
-                    # Berechne avg torque im gelernten Gang (zur Referenz für Dips)
-                    avg_torque = 2000
-                    target_gear_data = df[(df['gear'] == gear_to) & (df['throttle'] > 0.9)]
-                    if not target_gear_data.empty:
-                        avg_t = target_gear_data['torque'].quantile(0.8)
-                        if avg_t > 0: avg_torque = avg_t
-                        
-                    drop_threshold = avg_torque * 0.4 # Einbruch unter 40% der Zugkraft = Shift Phase
-                    
-                    dip_window = window[window['torque'] < drop_threshold]
-                    
-                    if not dip_window.empty:
-                        latency = dip_window['time_elapsed'].max() - dip_window['time_elapsed'].min()
-                        latency_ms = latency * 1000
-                        # RPM landepunkt = first point after latency where torque >= threshold
-                        recover_df = window[(window['time_elapsed'] > dip_window['time_elapsed'].max()) & (window['torque'] >= drop_threshold)]
-                        rpm_land = recover_df.iloc[0]['rpm'] if not recover_df.empty else row['rpm']
-                    else:
-                        latency_ms = 0.0
-                        rpm_land = row['rpm']
-                        
-                    metrics.append({
-                        'gear_from': int(gear_from),
-                        'gear_to': int(gear_to),
-                        'time': shift_time,
-                        'latency_ms': latency_ms,
-                        'rpm_land': rpm_land
-                    })
-                return metrics
-                
-            shifts_a = extract_shift_metrics(tele_a)
-            shifts_b = extract_shift_metrics(tele_b)
-            
-            def calculate_0_to_x(df, target_speed):
-                filtered = df[df['speed_kmh'] >= target_speed]
-                if filtered.empty: return None
-                return filtered.iloc[0]['time_elapsed'] - df.iloc[0]['time_elapsed']
+        sub_drag, sub_shift, sub_opt = st.tabs(["🚀 Performance Vergleich", "⚙️ Getriebe-Analyse", "🔧 Optimierung (Torque)"])
 
-            # --- Layout: KPIs ---
-            st.subheader("📊 Beschleunigungs-Intervalle & Vmax")
-            c1, c2, c3, c4 = st.columns(4)
+        with sub_drag:
+            st.markdown("Vergleiche Beschleunigungszeiten und Vmax zwischen Fahrzeugen/Setups.")
+            mode = st.radio("Analyse-Modus:", ["Original-Telemetrie (Rohdaten)", "Virtual Best-Run (Mathematisch korrigiert)"], 
+                            help="Virtual Best-Run berechnet die Zeiten iterativ anhand der maximalen Beschleunigungskraft pro km/h ('Envelope'). Verlorene Zeit im Begrenzer ('Treppchen') wird mathematisch gelöscht und Schaltvorgänge auf 0.08s standardisiert. Dies ist der Goldstandard für reine Performance-Vergleiche!")
+            use_virtual_run = "Virtual Best-Run" in mode
             
-            def render_accel_kpi(col, label, speed_start, speed_target):
-                df_start_a = tele_a[tele_a['speed_kmh'] >= speed_start]
-                df_start_b = tele_b[tele_b['speed_kmh'] >= speed_start]
+            st.number_input("Speed-Trigger für Synchronisation (km/h)", min_value=1, max_value=200, value=50, step=5, key="sync_speed_bench", help="Die Läufe werden exakt an dem Punkt ausgerichtet (Zeit=0), an dem sie diese Geschwindigkeit überschreiten. Ein Wert > 50 km/h eliminiert Fehler durch Schlupf oder unterschiedliche Reaktionszeiten am Start.")
+            
+            if st.button("Vergleich Starten"):
+                tele_a = load_telemetry(run_a_id)
+                tele_b = load_telemetry(run_b_id)
+                sync_speed_bench_val = st.session_state.sync_speed_bench
                 
-                df_end_a = tele_a[tele_a['speed_kmh'] >= speed_target]
-                df_end_b = tele_b[tele_b['speed_kmh'] >= speed_target]
-                
-                val_a = (df_end_a.iloc[0]['time_elapsed'] - df_start_a.iloc[0]['time_elapsed']) if not df_end_a.empty and not df_start_a.empty else None
-                val_b = (df_end_b.iloc[0]['time_elapsed'] - df_start_b.iloc[0]['time_elapsed']) if not df_end_b.empty and not df_start_b.empty else None
-                
-                val_a_str = f"{val_a:.2f} s" if val_a else "N/A"
-                if val_a and val_b:
-                    delta = val_a - val_b
-                    col.metric(label, val_a_str, delta=f"{delta:+.2f} s", delta_color="inverse")
-                else:
-                    col.metric(label, val_a_str)
+                if use_virtual_run:
+                    def generate_virtual_run(df):
+                        df_valid = df[df['torque'] > 0].copy()
+                        if df_valid.empty: return df
+                        
+                        df_valid['speed_bin'] = df_valid['speed_kmh'].round()
+                        envelope = df_valid.groupby('speed_bin')['torque'].quantile(0.95).reset_index()
+                        if len(envelope) < 5: return df
+                        
+                        min_bin = int(envelope['speed_bin'].min())
+                        max_bin = int(envelope['speed_bin'].max())
+                        envelope = envelope.set_index('speed_bin').reindex(range(min_bin, max_bin + 1)).interpolate(method='linear').reset_index()
+                        
+                        start_speed = max(0.0, df['speed_kmh'].iloc[0])
+                        max_speed = df['speed_kmh'].max()
+                        
+                        accels_m_s2 = np.maximum(envelope['torque'].values / 1000.0, 0.05)
+                        accel_interp = interp1d(envelope['speed_bin'].values, accels_m_s2, kind='linear', fill_value="extrapolate")
+                        
+                        sim_speeds = np.arange(start_speed, max_speed, 0.1)
+                        sim_times = []
+                        current_time = df['time_elapsed'].iloc[0]
+                        
+                        shift_speeds = []
+                        last_gear = df_valid['gear'].iloc[0]
+                        for i in range(1, len(df_valid)):
+                            if df_valid['gear'].iloc[i] > last_gear:
+                                shift_speeds.append(df_valid['speed_kmh'].iloc[i])
+                                last_gear = df_valid['gear'].iloc[i]
+                                
+                        shift_delay = 0.08
+                        shifts_applied = sum(1 for s in shift_speeds if s < start_speed)
+                        
+                        for v in sim_speeds:
+                            a = accel_interp(v)
+                            if a < 0.05: a = 0.05
+                            dt = (0.1 / 3.6) / a
+                            
+                            while shifts_applied < len(shift_speeds) and v >= shift_speeds[shifts_applied]:
+                                current_time += shift_delay
+                                shifts_applied += 1
+                                
+                            current_time += dt
+                            sim_times.append(current_time)
+                            
+                        return pd.DataFrame({
+                            'time_elapsed': sim_times,
+                            'speed_kmh': sim_speeds
+                        })
                     
-            render_accel_kpi(c1, "0-100 km/h", sync_speed, 100) # Normed to sync_speed because of t=0 shift
-            render_accel_kpi(c2, "0-200 km/h", sync_speed, 200)
-            render_accel_kpi(c3, "100-250 km/h", 100, 250)
-            
-            vmax_a = tele_a['speed_kmh'].max()
-            vmax_b = tele_b['speed_kmh'].max()
-            c4.metric("Vmax", f"{vmax_a:.1f} km/h", delta=f"{vmax_a - vmax_b:+.1f} km/h", delta_color="normal")
-            
-            st.markdown("---")
-            
-            st.subheader("⚙️ Shift-Performance Tabelle")
-            col_t1, col_t2 = st.columns(2)
-            
-            with col_t1:
-                st.markdown("**Auto A: Schaltanalyse**")
-                if shifts_a:
-                    df_sa = pd.DataFrame(shifts_a)
-                    df_sa['Gangwechsel'] = df_sa['gear_from'].astype(str) + " ➡️ " + df_sa['gear_to'].astype(str)
-                    df_sa['Latenz (Zugkraftunterbrechung)'] = df_sa['latency_ms'].map("{:.0f} ms".format)
-                    df_sa['RPM Landepunkt'] = df_sa['rpm_land'].map("{:.0f} RPM".format)
-                    st.dataframe(df_sa[['Gangwechsel', 'Latenz (Zugkraftunterbrechung)', 'RPM Landepunkt']], hide_index=True, width='stretch')
-                else:
-                    st.info("Keine Schaltvorgänge gefunden.")
-                    
-            with col_t2:
-                st.markdown("**Auto B: Schaltanalyse**")
-                if shifts_b:
-                    df_sb = pd.DataFrame(shifts_b)
-                    df_sb['Gangwechsel'] = df_sb['gear_from'].astype(str) + " ➡️ " + df_sb['gear_to'].astype(str)
-                    df_sb['Latenz (Zugkraftunterbrechung)'] = df_sb['latency_ms'].map("{:.0f} ms".format)
-                    df_sb['RPM Landepunkt'] = df_sb['rpm_land'].map("{:.0f} RPM".format)
-                    st.dataframe(df_sb[['Gangwechsel', 'Latenz (Zugkraftunterbrechung)', 'RPM Landepunkt']], hide_index=True, width='stretch')
-                else:
-                    st.info("Keine Schaltvorgänge gefunden.")
-                    
-            # Gear by gear accel
-            def gear_accel(df):
-                res = []
-                for g in sorted(df['gear'].unique()):
-                    if g < 1: continue
-                    d = df[(df['gear'] == g) & (df['throttle'] > 0.9) & (df['torque'] > 0)]
-                    if not d.empty:
-                        res.append({'Gang': int(g), 'Accel': d['torque'].mean() / 1000.0})
-                return pd.DataFrame(res)
+                    tele_a = generate_virtual_run(tele_a)
+                    tele_b = generate_virtual_run(tele_b)
                 
-            ga_a = gear_accel(tele_a)
-            ga_b = gear_accel(tele_b)
-            if not ga_a.empty and not ga_b.empty:
-                ga_merged = pd.merge(ga_a, ga_b, on='Gang', how='outer', suffixes=(' Auto A', ' Auto B')).fillna(0)
-                fig_bar = go.Figure(data=[
-                    go.Bar(name='Auto A', x=ga_merged['Gang'], y=ga_merged['Accel Auto A'], marker_color='#00ff88'),
-                    go.Bar(name='Auto B', x=ga_merged['Gang'], y=ga_merged['Accel Auto B'], marker_color='#ff0055')
-                ])
-                fig_bar.update_layout(title="Durchschnittliche Beschleunigung pro Gang (Volllast) [m/s²]", barmode='group', template='plotly_dark')
-                st.plotly_chart(fig_bar, width='stretch')
-                
-            st.markdown("---")
-            
-            st.subheader("📈 The Shift Gap - Speed Delta Overlay")
-            st.markdown("Zoome in die Kurve rein, um den Geschwindigkeits-Dip bei jedem Gangwechsel ('Time Lost due to Over-Revving' / Latenz) genau zu sehen.")
-            
-            max_t = min(tele_a['time_elapsed'].max(), tele_b['time_elapsed'].max())
-            ta_plot = tele_a[tele_a['time_elapsed'] <= max_t]
-            tb_plot = tele_b[tele_b['time_elapsed'] <= max_t]
-            
-            from plotly.subplots import make_subplots
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.08)
-            
-            fig.add_trace(go.Scatter(x=ta_plot['time_elapsed'], y=ta_plot['speed_kmh'], name="Speed Auto A", mode='lines', line=dict(color='#00ff88')), row=1, col=1)
-            fig.add_trace(go.Scatter(x=tb_plot['time_elapsed'], y=tb_plot['speed_kmh'], name="Speed Auto B", mode='lines', line=dict(color='#ff0055')), row=1, col=1)
-            
-            # Delta
-            if len(tb_plot) > 5 and len(ta_plot) > 5:
-                interp_b = interp1d(tb_plot['time_elapsed'], tb_plot['speed_kmh'], kind='linear', fill_value="extrapolate")
-                delta_speed = ta_plot['speed_kmh'] - interp_b(ta_plot['time_elapsed'])
-                fig.add_trace(go.Scatter(x=ta_plot['time_elapsed'], y=delta_speed, name='Delta (A - B) [km/h]', mode='lines', line=dict(color='#00bfff', width=1), fill='tozeroy'), row=2, col=1)
-            
-            # Shift Markers
-            for s in shifts_a:
-                fig.add_vline(x=s['time'], line_dash="dash", line_color="rgba(0, 255, 136, 0.8)", row=1, col=1)
-            for s in shifts_b:
-                fig.add_vline(x=s['time'], line_dash="dash", line_color="rgba(255, 0, 85, 0.8)", row=1, col=1)
-                
-            fig.update_layout(height=600, template="plotly_dark", hovermode="x unified")
-            fig.update_xaxes(title_text="Zeit (s)", row=2, col=1)
-            fig.update_yaxes(title_text="Geschw. (km/h)", row=1, col=1)
-            fig.update_yaxes(title_text="Delta km/h", row=2, col=1)
-            st.plotly_chart(fig, width='stretch')
-            
-            st.markdown("---")
-            st.subheader("🏎️ Virtual Drag Race (Distanz-Delta)")
-            st.markdown("Das Distanz-Delta zeigt an, um wie viele Meter ein Auto voraus ist. Ein positiver Wert bedeutet, Auto A führt.")
-            
-            if len(tb_plot) > 5 and len(ta_plot) > 5:
-                interp_dist_b = interp1d(tb_plot['time_elapsed'], tb_plot['distance_cum'], kind='linear', fill_value="extrapolate")
-                dist_delta = ta_plot['distance_cum'] - interp_dist_b(ta_plot['time_elapsed'])
-                
-                fig_dist = go.Figure()
-                fig_dist.add_trace(go.Scatter(x=ta_plot['time_elapsed'], y=dist_delta, name='Vorsprung Auto A (Meter)', mode='lines', line=dict(color='#e0e0e0', width=3), fill='tozeroy'))
-                fig_dist.update_layout(height=350, template="plotly_dark", xaxis_title="Zeit (s)", yaxis_title="Vorsprung Auto A [Meter]")
-                
-                # Highlight Shifts im Distanzgraphen um zu sehen, wie sich der Abstand beim Schalten aufbaut
-                for s in shifts_a:
-                    fig_dist.add_vline(x=s['time'], line_dash="dash", line_color="rgba(0, 255, 136, 0.5)")
-                    
-                st.plotly_chart(fig_dist, width='stretch')
-                
-                final_gap = dist_delta.iloc[-1]
-                distance_driven = ta_plot['distance_cum'].iloc[-1]
-                if final_gap > 0:
-                    st.success(f"🏁 **Zielkreuzung (nach {distance_driven:.0f} Metern):** Auto A gewinnt mit **{final_gap:.2f} Metern** Vorsprung!")
-                elif final_gap < 0:
-                    st.error(f"🏁 **Zielkreuzung (nach {distance_driven:.0f} Metern):** Auto B gewinnt mit **{abs(final_gap):.2f} Metern** Vorsprung!")
-                else:
-                    st.info(f"🏁 **Zielkreuzung (nach {distance_driven:.0f} Metern):** Unentschieden!")
-
-with tab3:
-    st.header("Datenbank / Logs verwalten")
-    st.markdown("Hier kannst du alle gespeicherten Telemetrie-Aufzeichnungen sehen und endgültig aus der Datenbank löschen.")
+                def normalize_bench_run(df, target_sync_speed):
+                    df_start = df[df['speed_kmh'] >= target_sync_speed]
+                    if not df_start.empty:
+                        t0 = df_start.iloc[0]['time_elapsed']
+                        df_norm = df[df['time_elapsed'] >= t0].copy()
+                        df_norm['time_elapsed'] = df_norm['time_elapsed'] - t0
+                        return df_norm
+                    return df
     
-    if runs_df.empty:
-        st.info("Die Datenbank ist derzeit leer.")
-    else:
-        st.dataframe(
-            runs_df[['id', 'run_type', 'vehicle_name', 'vehicle_class', 'track_name', 'timestamp', 'notes']], 
-            width='stretch',
-            hide_index=True
-        )
-        
-        run_options_edit = get_run_options(runs_df)
-        
-        st.markdown("---")
-        st.subheader("💾 Backup (Export / Import)")
-        st.markdown("Hier kannst du die komplette Datenbank herunterladen oder ein existierendes Backup wiederherstellen.")
-        
-        col_down, col_up = st.columns(2)
-        
-        with col_down:
-            try:
-                with open(DB_PATH, "rb") as f:
-                    db_bytes = f.read()
-                    st.download_button(
-                        label="📥 Gesamte Datenbank (.db) herunterladen",
-                        data=db_bytes,
-                        file_name=f"lmu_telemetry_backup_{time.strftime('%Y%m%d_%H%M%S')}.db",
-                        mime="application/octet-stream",
-                        width='stretch'
-                    )
-            except Exception as e:
-                 st.error("Fehler beim Erstellen des Backups.")
+                tele_a = normalize_bench_run(tele_a, sync_speed_bench_val)
+                tele_b = normalize_bench_run(tele_b, sync_speed_bench_val)
+    
+                def calculate_0_to_x(df, target_speed):
+                    filtered = df[df['speed_kmh'] >= target_speed]
+                    if filtered.empty:
+                        return None
+                    return filtered.iloc[0]['time_elapsed'] - df.iloc[0]['time_elapsed']
+    
+                metrics_a = {
+                    f"{sync_speed_bench_val}-100 km/h": calculate_0_to_x(tele_a, 100),
+                    f"{sync_speed_bench_val}-200 km/h": calculate_0_to_x(tele_a, 200),
+                    f"{sync_speed_bench_val}-300 km/h": calculate_0_to_x(tele_a, 300),
+                    "Vmax": tele_a['speed_kmh'].max()
+                }
                 
-        with col_up:
-            uploaded_file = st.file_uploader("📤 Datenbank (.db) hochladen", type=["db"])
-            if uploaded_file is not None:
-                if st.button("⚠️ Backup einspielen (Überschreibt alle Daten!)", type="primary", width='stretch'):
-                    try:
-                        with open(DB_PATH, "wb") as f:
-                            f.write(uploaded_file.getbuffer())
-                        st.success("Backup erfolgreich eingespielt! Seite lädt neu...")
-                        time.sleep(1.5)
-                        st.rerun()
-                    except Exception as e:
-                        st.error("Fehler beim Einspielen des Backups.")
-
-        st.markdown("---")
-
-        st.subheader("📊 Einzelnen Run exportieren")
-        selected_export_str = st.selectbox("Wähle einen Run für den CSV-Export", run_options_edit, key="export_selectbox")
-        
-        if selected_export_str:
-            export_id = int(selected_export_str.split(" - ")[0])
-            export_df = load_telemetry(export_id)
-            if not export_df.empty:
-                csv = export_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label=f"📥 Run {export_id} als CSV herunterladen",
-                    data=csv,
-                    file_name=f"lmu_run_{export_id}.csv",
-                    mime="text/csv",
-                )
-
-        st.markdown("---")
-        
-        st.subheader("📝 Notiz bearbeiten / hinzufügen")
-        selected_note_str = st.selectbox("Wähle einen Run, um eine Notiz zu bearbeiten", run_options_edit, key="note_selectbox")
-        
-        if selected_note_str:
-            note_id = int(selected_note_str.split(" - ")[0])
-            current_note = runs_df[runs_df['id'] == note_id].iloc[0].get('notes', '')
-            if pd.isna(current_note):
-                current_note = ""
+                metrics_b = {
+                    f"{sync_speed_bench_val}-100 km/h": calculate_0_to_x(tele_b, 100),
+                    f"{sync_speed_bench_val}-200 km/h": calculate_0_to_x(tele_b, 200),
+                    f"{sync_speed_bench_val}-300 km/h": calculate_0_to_x(tele_b, 300),
+                    "Vmax": tele_b['speed_kmh'].max()
+                }
                 
-            new_note = st.text_area("Notiz (z.B. Setup-Vorgaben, Besonderheiten beim Launch, etc.):", value=current_note)
+                st.subheader("📊 Performance KPIs")
+                
+                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                
+                def render_metric(col, label, key):
+                    val_a = metrics_a[key]
+                    val_b = metrics_b[key]
+                    
+                    if val_a is None: val_a_str = "N/A"
+                    elif key == "Vmax": val_a_str = f"{val_a:.1f} km/h"
+                    else: val_a_str = f"{val_a:.2f} s"
+                    
+                    if val_a is not None and val_b is not None:
+                        delta = val_a - val_b
+                        # Für Vmax ist positiv besser, für Beschleunigung ist negativ besser
+                        if key == "Vmax":
+                            delta_str = f"{delta:+.1f} km/h (A vs B)"
+                            color = "normal" if delta == 0 else "inverse"  # invert colors natively in streamlit is tricky, let's just show string
+                        else:
+                            delta_str = f"{delta:+.2f} s (A vs B)"
+                    else:
+                        delta_str = "N/A"
+                        
+                    col.metric(label=f"A: {label}", value=val_a_str, delta=delta_str, delta_color="inverse" if key != "Vmax" else "normal")
+                
+                render_metric(m_col1, f"{sync_speed_bench_val}-100 km/h", f"{sync_speed_bench_val}-100 km/h")
+                render_metric(m_col2, f"{sync_speed_bench_val}-200 km/h", f"{sync_speed_bench_val}-200 km/h")
+                render_metric(m_col3, f"{sync_speed_bench_val}-300 km/h", f"{sync_speed_bench_val}-300 km/h")
+                render_metric(m_col4, "Vmax", "Vmax")
+                
+                st.subheader("Geschwindigkeit über Zeit / Speed-Curve Overlay")
+                
+                # Beschneide die längere Linie auf die Zeit der kürzeren Linie für einen optisch fairen Vergleich
+                max_plot_time = min(tele_a['time_elapsed'].max(), tele_b['time_elapsed'].max())
+                tele_a_plot = tele_a[tele_a['time_elapsed'] <= max_plot_time]
+                tele_b_plot = tele_b[tele_b['time_elapsed'] <= max_plot_time]
+                
+                fig_speed = go.Figure()
+                fig_speed.add_trace(go.Scatter(x=tele_a_plot['time_elapsed'], y=tele_a_plot['speed_kmh'], name=f"A: {car_a_str.split(' - ')[1]}", mode='lines', line=dict(color='#00ff88')))
+                fig_speed.add_trace(go.Scatter(x=tele_b_plot['time_elapsed'], y=tele_b_plot['speed_kmh'], name=f"B: {car_b_str.split(' - ')[1]}", mode='lines', line=dict(color='#ff0055')))
+                
+                fig_speed.update_layout(xaxis_title="Time (s)", yaxis_title="Speed (km/h)", template="plotly_dark")
+                st.plotly_chart(fig_speed, width='stretch')
+    
+    
+        with sub_shift:
+            st.markdown("Vergleiche zwei Beschleunigungsfahrten hochpräzise. Analysiere Schaltlatenzen, RPM Tipps.")
+            st.number_input("Speed-Trigger für Synchronisation (km/h)", min_value=1, max_value=200, value=50, step=5, key="sync_speed", help="Die Läufe werden exakt an dem Punkt ausgerichtet (Zeit=0), an dem sie diese Geschwindigkeit überschreiten. Ein Wert > 50 km/h eliminiert Fehler durch Schlupf oder unterschiedliche Reaktionszeiten am Start.")
             
-            if st.button("💾 Notiz speichern"):
-                try:
-                    conn_note = sqlite3.connect(DB_PATH)
-                    c_note = conn_note.cursor()
-                    c_note.execute("UPDATE runs SET notes = ? WHERE id = ?", (new_note, note_id))
-                    conn_note.commit()
-                    conn_note.close()
-                    st.success("Notiz erfolgreich gespeichert!")
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Fehler: {e}")
-
-        st.markdown("---")
-        
-        st.subheader("🗑️ Eintrag löschen")
-        st.warning("⚠️ Beim Löschen werden auch tausende Telemetrie-Datenpunkte aus der Datenbank entfernt. Dies kann nicht rückgängig gemacht werden.")
-        selected_del_str = st.selectbox("Wähle einen Run zum Löschen aus", run_options_edit, key="delete_selectbox")
-        
-        if selected_del_str:
-            del_id = int(selected_del_str.split(" - ")[0])
-            del_info = runs_df[runs_df['id'] == del_id].iloc[0]
-            st.error(f"⚠️ **Folgender Eintrag wird gelöscht:**\n\n**ID:** `{del_id}` | **Typ:** `{del_info['run_type']}` | **Fahrzeug:** `{del_info['vehicle_name']}` | **Strecke:** `{del_info['track_name']}` | **Zeit:** `{del_info['timestamp']}`")
-        
-        if st.button("🗑️ Run permanent löschen", type="primary"):
-            del_id = int(selected_del_str.split(" - ")[0])
-            try:
-                conn_del = sqlite3.connect(DB_PATH)
-                c = conn_del.cursor()
-                # Lösche raw telemetry
-                c.execute(f"DELETE FROM telemetry_data WHERE run_id = {del_id}")
-                # Lösche run Metadaten
-                c.execute(f"DELETE FROM runs WHERE id = {del_id}")
-                # Lösche evtl. generierte Overlay-Profile
-                try:
-                     c.execute(f"DELETE FROM saved_profiles WHERE run_id = {del_id}")
-                except:
-                     pass
-                conn_del.commit()
-                conn_del.close()
+            if st.button("🏁 Analyse Starten", type="primary", width='stretch'):
+                tele_a_raw = load_telemetry(run_a_id)
+                tele_b_raw = load_telemetry(run_b_id)
                 
-                st.success(f"Run {del_id} und alle dazugehörigen Telemetriedaten wurden gelöscht!")
-                time.sleep(1) # kurzes Delay für die Success-Nachricht
-                st.rerun()
-            except Exception as e:
-                st.error(f"Fehler beim Löschen: {e}")
-
-with tab_handling:
-    st.header("Handling & Grip Analyzer")
+                sync_speed = st.session_state.sync_speed
+                
+                def normalize_run(df, target_sync_speed):
+                    df_start = df[df['speed_kmh'] >= target_sync_speed]
+                    if not df_start.empty:
+                        t0 = df_start.iloc[0]['time_elapsed']
+                        df_norm = df[df['time_elapsed'] >= t0].copy()
+                        df_norm['time_elapsed'] = df_norm['time_elapsed'] - t0
+                    else:
+                        df_norm = df.copy()
+                        
+                    # Berechne zurückgelegte Strecke (ds = v * dt)
+                    df_norm['distance_m'] = (df_norm['speed_kmh'] / 3.6) * df_norm['time_elapsed'].diff().fillna(0)
+                    df_norm['distance_cum'] = df_norm['distance_m'].cumsum()
+                    
+                    return df_norm
+                    
+                tele_a = normalize_run(tele_a_raw, sync_speed)
+                tele_b = normalize_run(tele_b_raw, sync_speed)
+                
+                def extract_shift_metrics(df):
+                    metrics = []
+                    # Shift detection: changing gear
+                    df = df.reset_index(drop=True)
+                    gear_changes = df[df['gear'].diff() > 0]
+                    
+                    for idx, row in gear_changes.iterrows():
+                        if idx == 0: continue
+                        gear_from = df.loc[idx-1, 'gear']
+                        gear_to = row['gear']
+                        shift_time = row['time_elapsed']
+                        
+                        # Window +/- 0.4s
+                        window = df[(df['time_elapsed'] >= shift_time - 0.4) & (df['time_elapsed'] <= shift_time + 0.4)]
+                        if window.empty: continue
+                        
+                        # Berechne avg torque im gelernten Gang (zur Referenz für Dips)
+                        avg_torque = 2000
+                        target_gear_data = df[(df['gear'] == gear_to) & (df['throttle'] > 0.9)]
+                        if not target_gear_data.empty:
+                            avg_t = target_gear_data['torque'].quantile(0.8)
+                            if avg_t > 0: avg_torque = avg_t
+                            
+                        drop_threshold = avg_torque * 0.4 # Einbruch unter 40% der Zugkraft = Shift Phase
+                        
+                        dip_window = window[window['torque'] < drop_threshold]
+                        
+                        if not dip_window.empty:
+                            latency = dip_window['time_elapsed'].max() - dip_window['time_elapsed'].min()
+                            latency_ms = latency * 1000
+                            # RPM landepunkt = first point after latency where torque >= threshold
+                            recover_df = window[(window['time_elapsed'] > dip_window['time_elapsed'].max()) & (window['torque'] >= drop_threshold)]
+                            rpm_land = recover_df.iloc[0]['rpm'] if not recover_df.empty else row['rpm']
+                        else:
+                            latency_ms = 0.0
+                            rpm_land = row['rpm']
+                            
+                        metrics.append({
+                            'gear_from': int(gear_from),
+                            'gear_to': int(gear_to),
+                            'time': shift_time,
+                            'latency_ms': latency_ms,
+                            'rpm_land': rpm_land
+                        })
+                    return metrics
+                    
+                shifts_a = extract_shift_metrics(tele_a)
+                shifts_b = extract_shift_metrics(tele_b)
+                
+                def calculate_0_to_x(df, target_speed):
+                    filtered = df[df['speed_kmh'] >= target_speed]
+                    if filtered.empty: return None
+                    return filtered.iloc[0]['time_elapsed'] - df.iloc[0]['time_elapsed']
+    
+                # --- Layout: KPIs ---
+                st.subheader("📊 Beschleunigungs-Intervalle & Vmax")
+                c1, c2, c3, c4 = st.columns(4)
+                
+                def render_accel_kpi(col, label, speed_start, speed_target):
+                    df_start_a = tele_a[tele_a['speed_kmh'] >= speed_start]
+                    df_start_b = tele_b[tele_b['speed_kmh'] >= speed_start]
+                    
+                    df_end_a = tele_a[tele_a['speed_kmh'] >= speed_target]
+                    df_end_b = tele_b[tele_b['speed_kmh'] >= speed_target]
+                    
+                    val_a = (df_end_a.iloc[0]['time_elapsed'] - df_start_a.iloc[0]['time_elapsed']) if not df_end_a.empty and not df_start_a.empty else None
+                    val_b = (df_end_b.iloc[0]['time_elapsed'] - df_start_b.iloc[0]['time_elapsed']) if not df_end_b.empty and not df_start_b.empty else None
+                    
+                    val_a_str = f"{val_a:.2f} s" if val_a else "N/A"
+                    if val_a and val_b:
+                        delta = val_a - val_b
+                        col.metric(label, val_a_str, delta=f"{delta:+.2f} s", delta_color="inverse")
+                    else:
+                        col.metric(label, val_a_str)
+                        
+                render_accel_kpi(c1, "0-100 km/h", sync_speed, 100) # Normed to sync_speed because of t=0 shift
+                render_accel_kpi(c2, "0-200 km/h", sync_speed, 200)
+                render_accel_kpi(c3, "100-250 km/h", 100, 250)
+                
+                vmax_a = tele_a['speed_kmh'].max()
+                vmax_b = tele_b['speed_kmh'].max()
+                c4.metric("Vmax", f"{vmax_a:.1f} km/h", delta=f"{vmax_a - vmax_b:+.1f} km/h", delta_color="normal")
+                
+                st.markdown("---")
+                
+                st.subheader("⚙️ Shift-Performance Tabelle")
+                col_t1, col_t2 = st.columns(2)
+                
+                with col_t1:
+                    st.markdown("**Auto A: Schaltanalyse**")
+                    if shifts_a:
+                        df_sa = pd.DataFrame(shifts_a)
+                        df_sa['Gangwechsel'] = df_sa['gear_from'].astype(str) + " ➡️ " + df_sa['gear_to'].astype(str)
+                        df_sa['Latenz (Zugkraftunterbrechung)'] = df_sa['latency_ms'].map("{:.0f} ms".format)
+                        df_sa['RPM Landepunkt'] = df_sa['rpm_land'].map("{:.0f} RPM".format)
+                        st.dataframe(df_sa[['Gangwechsel', 'Latenz (Zugkraftunterbrechung)', 'RPM Landepunkt']], hide_index=True, width='stretch')
+                    else:
+                        st.info("Keine Schaltvorgänge gefunden.")
+                        
+                with col_t2:
+                    st.markdown("**Auto B: Schaltanalyse**")
+                    if shifts_b:
+                        df_sb = pd.DataFrame(shifts_b)
+                        df_sb['Gangwechsel'] = df_sb['gear_from'].astype(str) + " ➡️ " + df_sb['gear_to'].astype(str)
+                        df_sb['Latenz (Zugkraftunterbrechung)'] = df_sb['latency_ms'].map("{:.0f} ms".format)
+                        df_sb['RPM Landepunkt'] = df_sb['rpm_land'].map("{:.0f} RPM".format)
+                        st.dataframe(df_sb[['Gangwechsel', 'Latenz (Zugkraftunterbrechung)', 'RPM Landepunkt']], hide_index=True, width='stretch')
+                    else:
+                        st.info("Keine Schaltvorgänge gefunden.")
+                        
+                # Gear by gear accel
+                def gear_accel(df):
+                    res = []
+                    for g in sorted(df['gear'].unique()):
+                        if g < 1: continue
+                        d = df[(df['gear'] == g) & (df['throttle'] > 0.9) & (df['torque'] > 0)]
+                        if not d.empty:
+                            res.append({'Gang': int(g), 'Accel': d['torque'].mean() / 1000.0})
+                    return pd.DataFrame(res)
+                    
+                ga_a = gear_accel(tele_a)
+                ga_b = gear_accel(tele_b)
+                if not ga_a.empty and not ga_b.empty:
+                    ga_merged = pd.merge(ga_a, ga_b, on='Gang', how='outer', suffixes=(' Auto A', ' Auto B')).fillna(0)
+                    fig_bar = go.Figure(data=[
+                        go.Bar(name='Auto A', x=ga_merged['Gang'], y=ga_merged['Accel Auto A'], marker_color='#00ff88'),
+                        go.Bar(name='Auto B', x=ga_merged['Gang'], y=ga_merged['Accel Auto B'], marker_color='#ff0055')
+                    ])
+                    fig_bar.update_layout(title="Durchschnittliche Beschleunigung pro Gang (Volllast) [m/s²]", barmode='group', template='plotly_dark')
+                    st.plotly_chart(fig_bar, width='stretch')
+                    
+                st.markdown("---")
+                
+                st.subheader("📈 The Shift Gap - Speed Delta Overlay")
+                st.markdown("Zoome in die Kurve rein, um den Geschwindigkeits-Dip bei jedem Gangwechsel ('Time Lost due to Over-Revving' / Latenz) genau zu sehen.")
+                
+                max_t = min(tele_a['time_elapsed'].max(), tele_b['time_elapsed'].max())
+                ta_plot = tele_a[tele_a['time_elapsed'] <= max_t]
+                tb_plot = tele_b[tele_b['time_elapsed'] <= max_t]
+                
+                from plotly.subplots import make_subplots
+                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.08)
+                
+                fig.add_trace(go.Scatter(x=ta_plot['time_elapsed'], y=ta_plot['speed_kmh'], name="Speed Auto A", mode='lines', line=dict(color='#00ff88')), row=1, col=1)
+                fig.add_trace(go.Scatter(x=tb_plot['time_elapsed'], y=tb_plot['speed_kmh'], name="Speed Auto B", mode='lines', line=dict(color='#ff0055')), row=1, col=1)
+                
+                # Delta
+                if len(tb_plot) > 5 and len(ta_plot) > 5:
+                    interp_b = interp1d(tb_plot['time_elapsed'], tb_plot['speed_kmh'], kind='linear', fill_value="extrapolate")
+                    delta_speed = ta_plot['speed_kmh'] - interp_b(ta_plot['time_elapsed'])
+                    fig.add_trace(go.Scatter(x=ta_plot['time_elapsed'], y=delta_speed, name='Delta (A - B) [km/h]', mode='lines', line=dict(color='#00bfff', width=1), fill='tozeroy'), row=2, col=1)
+                
+                # Shift Markers
+                for s in shifts_a:
+                    fig.add_vline(x=s['time'], line_dash="dash", line_color="rgba(0, 255, 136, 0.8)", row=1, col=1)
+                for s in shifts_b:
+                    fig.add_vline(x=s['time'], line_dash="dash", line_color="rgba(255, 0, 85, 0.8)", row=1, col=1)
+                    
+                fig.update_layout(height=600, template="plotly_dark", hovermode="x unified")
+                fig.update_xaxes(title_text="Zeit (s)", row=2, col=1)
+                fig.update_yaxes(title_text="Geschw. (km/h)", row=1, col=1)
+                fig.update_yaxes(title_text="Delta km/h", row=2, col=1)
+                st.plotly_chart(fig, width='stretch')
+                
+                st.markdown("---")
+                st.subheader("🏎️ Virtual Drag Race (Distanz-Delta)")
+                st.markdown("Das Distanz-Delta zeigt an, um wie viele Meter ein Auto voraus ist. Ein positiver Wert bedeutet, Auto A führt.")
+                
+                if len(tb_plot) > 5 and len(ta_plot) > 5:
+                    interp_dist_b = interp1d(tb_plot['time_elapsed'], tb_plot['distance_cum'], kind='linear', fill_value="extrapolate")
+                    dist_delta = ta_plot['distance_cum'] - interp_dist_b(ta_plot['time_elapsed'])
+                    
+                    fig_dist = go.Figure()
+                    fig_dist.add_trace(go.Scatter(x=ta_plot['time_elapsed'], y=dist_delta, name='Vorsprung Auto A (Meter)', mode='lines', line=dict(color='#e0e0e0', width=3), fill='tozeroy'))
+                    fig_dist.update_layout(height=350, template="plotly_dark", xaxis_title="Zeit (s)", yaxis_title="Vorsprung Auto A [Meter]")
+                    
+                    # Highlight Shifts im Distanzgraphen um zu sehen, wie sich der Abstand beim Schalten aufbaut
+                    for s in shifts_a:
+                        fig_dist.add_vline(x=s['time'], line_dash="dash", line_color="rgba(0, 255, 136, 0.5)")
+                        
+                    st.plotly_chart(fig_dist, width='stretch')
+                    
+                    final_gap = dist_delta.iloc[-1]
+                    distance_driven = ta_plot['distance_cum'].iloc[-1]
+                    if final_gap > 0:
+                        st.success(f"🏁 **Zielkreuzung (nach {distance_driven:.0f} Metern):** Auto A gewinnt mit **{final_gap:.2f} Metern** Vorsprung!")
+                    elif final_gap < 0:
+                        st.error(f"🏁 **Zielkreuzung (nach {distance_driven:.0f} Metern):** Auto B gewinnt mit **{abs(final_gap):.2f} Metern** Vorsprung!")
+                    else:
+                        st.info(f"🏁 **Zielkreuzung (nach {distance_driven:.0f} Metern):** Unentschieden!")
+    
+    
+        with sub_opt:
+            st.info("Die Optimierung wird für **Fahrzeug A** durchgeführt.")
+            selected_run_id = run_a_id
+            st.subheader("Getriebe-Daten & Übersetzung")
+            detection_mode = st.radio("Gear Ratio Detection Mode", ["Auto-Detect aus Telemetrie (Empfohlen)", "Manuelle Eingabe"])
+            
+            gear_ratios = []
+            final_drive_input = 1.0
+            opt = ShiftOptimizer(DB_PATH)
+            
+            if detection_mode == "Auto-Detect aus Telemetrie (Empfohlen)":
+                st.info("Das Tool berechnet das Verhältnis von Speed zu RPM basierend auf den Log-Daten des Autos automatisch und normiert die Kurven.")
+                detected_r_values = opt.get_auto_gear_ratios(selected_run_id)
+                if not detected_r_values:
+                    st.warning("Noch nicht genügend Telemetrie vorhanden (oder keine Volllast-Sektionen > 0.9 Throttle), um die Gänge automatisch zu erkennen. Bitte wechsle zur manuellen Eingabe.")
+                else:
+                    formatted_rs = ", ".join([f"G{i+1}: {r:.4f}" for i, r in enumerate(detected_r_values)])
+                    st.success(f"Erkannte Speed/RPM Ratio pro Gang: {formatted_rs}")
+                    # Mathematische Normierung: Ratio = 0.12 / R-Wert (entspricht dem alten Proxy in der Visualisierung)
+                    gear_ratios = [0.12 / r for r in detected_r_values]
+                    final_drive_input = 1.0 # Base factor
+                    
+            else:
+                col1, col2 = st.columns(2)
+                ratios_input = col1.text_input("Gear Ratios (kommagetrennt, z.B. 2.50, 1.90, 1.45, 1.20, 1.0, 0.85)", "2.50, 1.90, 1.45, 1.20, 1.0, 0.85")
+                final_drive_input = col2.number_input("Final Drive Ratio", value=3.40, step=0.1)
+                try:
+                    gear_ratios = [float(r.strip()) for r in ratios_input.split(',')]
+                except:
+                    st.error("Bitte überprüfe das Format der Gear Ratios.")
+            
+            st.subheader("Physikalische Fahrzeug-Parameter")
+            st.info("Du musst diese Werte nicht exakt wissen. Wähle einfach die ungefähre Fahrzeugklasse aus dem Dropdown, um realistische Standardwerte für Masse und Aerodynamik zu laden. Dies reicht für hochpräzise Schaltpunkte völlig aus!")
+            
+            presets = {
+                "GTE / LM GTE": {"mass": 1245.0, "radius": 0.35, "cwa": 1.60},
+                "Hypercar (LMH / LMDh)": {"mass": 1050.0, "radius": 0.35, "cwa": 1.35},
+                "LMP2": {"mass": 930.0, "radius": 0.33, "cwa": 1.25},
+                "GT3": {"mass": 1300.0, "radius": 0.34, "cwa": 1.55},
+                "Manuelle Eingabe": {"mass": 1200.0, "radius": 0.33, "cwa": 1.50}
+            }
+            
+            # Versuche eine smarte Vorauswahl basierend auf Fahrzeugnamen, falls möglich:
+            default_idx = 0 # GTE
+            try:
+                v_name_lower = runs_df[runs_df['id'] == selected_run_id]['vehicle_name'].values[0].lower()
+                if "hypercar" in v_name_lower or "lmdh" in v_name_lower or "lmh" in v_name_lower or "toyota" in v_name_lower or "ferrari_499" in v_name_lower or "porsche_963" in v_name_lower:
+                    default_idx = 1
+                elif "lmp2" in v_name_lower or "oreca" in v_name_lower:
+                    default_idx = 2
+                elif "gt3" in v_name_lower:
+                    default_idx = 3
+            except:
+                pass
+                
+            preset_choice = st.selectbox("Fahrzeugklasse (Preset)", list(presets.keys()), index=default_idx)
+            def_vals = presets[preset_choice]
+    
+            col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+            c_mass = col_p1.number_input("Fahrzeugmasse (kg)", value=def_vals["mass"], step=10.0, help="Masse inkl. Fahrer und Kraftstoff")
+            c_radius = col_p2.number_input("Radradius (m)", value=def_vals["radius"], step=0.01, help="Statischer Radius der Reifen. GTE/LMH: ca. 0.35m")
+            c_cwa = col_p3.number_input("Luftwiderstand $C_w \\cdot A$", value=def_vals["cwa"], step=0.1, help="Widerstandsbeiwert × Stirnfläche")
+            c_rho = col_p4.number_input("Luftdichte (kg/m³)", value=1.23, step=0.01)
+    
+            if st.button("Schaltpunkte berechnen"):
+                if not gear_ratios:
+                    st.stop()
+                    
+                token_curve = opt.get_torque_curve_from_run(
+                    selected_run_id, gear_ratios, final_drive_input,
+                    mass_kg=c_mass, wheel_radius_m=c_radius, c_w_a=c_cwa, rho=c_rho
+                )
+                
+                if token_curve is None or len(token_curve) < 5:
+                    st.error("Nicht genug valide Daten im ausgewählten Run oder die Telemetrie ist verschlüsselt (Torque=0).")
+                else:
+                    st.subheader("Berechnetes physikalisches Motor-Drehmoment")
+                    fig_engine = go.Figure()
+                    fig_engine.add_trace(go.Scatter(x=token_curve['rpm_rounded'], y=token_curve['torque_smoothed'], mode='lines', name='Torque Curve', line=dict(color='#ffaa00', width=3)))
+                    fig_engine.update_layout(xaxis_title="RPM", yaxis_title="Motor Drehmoment (Nm)", template="plotly_dark")
+                    st.plotly_chart(fig_engine, width='stretch')
+                    
+                    # Berechne Schaltpunkte
+                    shift_points, rpms, wheel_torques = opt.calculate_ideal_shift_points(token_curve, gear_ratios, final_drive_input, wheel_radius_m=c_radius)
+                    
+                    # Speichere die Schaltpunkte ab für das Overlay
+                    import json
+                    try:
+                        conn_sp = sqlite3.connect(DB_PATH)
+                        cursor_sp = conn_sp.cursor()
+                        cursor_sp.execute('CREATE TABLE IF NOT EXISTS saved_profiles (run_id INTEGER PRIMARY KEY, vehicle_name TEXT, shift_points_json TEXT)')
+                        
+                        # Hole Fahrzeugnamen
+                        v_name = runs_df[runs_df['id'] == selected_run_id]['vehicle_name'].values[0]
+                        
+                        cursor_sp.execute('''
+                            INSERT OR REPLACE INTO saved_profiles (run_id, vehicle_name, shift_points_json) 
+                            VALUES (?, ?, ?)
+                        ''', (selected_run_id, v_name, json.dumps(shift_points)))
+                        conn_sp.commit()
+                        conn_sp.close()
+                    except Exception as e:
+                        st.warning(f"Konnte Profile für Overlay nicht speichern: {e}")
+                    
+                    st.subheader("Brutto Radzugkraft vs Speed (Sägezahn-Schnittpunkte)")
+                    st.markdown("Hier siehst du die erzeugte Kraft am Rad in Newton. Der Schnittpunkt (Kraftverlust) erzwingt mathematisch den optimalen Schaltpunkt.")
+                    fig_wheel = go.Figure()
+                    
+                    for i, wt in enumerate(wheel_torques):
+                        # Berechne Proxy Geschwindgkeit, damit die Kurven sich auf der X-Achse überschneiden 
+                        # v_m/s = (RPM * 2 * pi / 60) * (wheel_radius) / (gear_ratio * final_drive)
+                        # v_km/h = v_m/s * 3.6
+                        try:
+                            ratio = gear_ratios[i]
+                        except:
+                            ratio = gear_ratios[-1]
+                            
+                        # Physisch korrekte Geschwindigkeit:
+                        v_mps = (rpms * 2 * np.pi / 60) * c_radius / (ratio * final_drive_input)
+                        speed_proxy = v_mps * 3.6
+                        
+                        fig_wheel.add_trace(go.Scatter(x=speed_proxy, y=wt, mode='lines', name=f'Gang {i+1}'))
+                    
+                    fig_wheel.update_layout(xaxis_title="Geschwindigkeit (km/h)", yaxis_title="Radzugkraft (F_wheel) [N]", template="plotly_dark")
+                    st.plotly_chart(fig_wheel, width='stretch')
+                    
+                    st.subheader("✅ Empfohlene Schaltpunkte")
+                    for sp in shift_points:
+                        st.success(f"Schalte **Gang {sp['from_gear']} ➡️ {sp['to_gear']}** bei **{sp['shift_rpm']:.0f} RPM** (RPM fällt auf ca. {sp['rpm_drop_to']:.0f})")
+    
+    
+with tab_quer:
+    st.header("🏎️ Kurven & Grip")
     st.markdown("Vergleiche das Fahrwerks- und Aerodynamik-Potenzial (Traktionskreis, Kurvenspeed, G-Kräfte) zwischen zwei Autos oder Setups.")
     
     handling_runs = runs_df[runs_df['run_type'] == 'HANDLING']
@@ -1103,8 +942,11 @@ with tab_handling:
         run_options = get_run_options(handling_runs)
         
         col1, col2 = st.columns(2)
-        car_a_str_h = col1.selectbox("Auto A (Referenz)", run_options, key="handling_a")
-        car_b_str_h = col2.selectbox("Auto B (Vergleich)", run_options, key="handling_b")
+        idx_a_h = get_default_run_index(run_options.tolist(), st.session_state.car_a_name)
+        car_a_str_h = col1.selectbox("Auto A (Referenz)", run_options, index=idx_a_h, key="quer_car_a", on_change=on_car_change, args=("quer_car_a", "quer_car_b", handling_runs))
+        idx_b_h = get_default_run_index(run_options.tolist(), st.session_state.car_b_name)
+        if idx_b_h == 0 and len(run_options) > 1: idx_b_h = 1
+        car_b_str_h = col2.selectbox("Auto B (Vergleich)", run_options, index=idx_b_h, key="quer_car_b", on_change=on_car_change, args=("quer_car_a", "quer_car_b", handling_runs))
         
         c1, c2 = st.columns(2)
         fuel_a = c1.number_input("Fuel Load Auto A (Liters)", value=50, step=1, key="fuel_a")
@@ -1325,8 +1167,9 @@ with tab_handling:
                 else:
                     st.info("Keine vollständigen Sektor-Zeiten gefunden. Bitte fahre ganze Runden für die Sektor-Analyse.")
 
-with tab_scoring:
-    st.header("Overall Performance Scoring")
+
+with tab_score:
+    st.header("⚖️ Head-to-Head Gesamt-Vergleich")
     st.markdown("Vergleiche zwei Fahrzeuge head-to-head und generiere einen Track-spezifischen Overall Performance Index (OPI).")
     
     drag_runs = runs_df[runs_df['run_type'] == 'DRAG']
@@ -1341,13 +1184,19 @@ with tab_scoring:
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Fahrzeug A (Referenz)")
-            a_drag_str = st.selectbox("Wähle Drag-Daten (Power & Vmax)", drag_options, key="opi_a_drag")
-            a_handling_str = st.selectbox("Wähle Handling-Daten (Grip & Brake)", handling_options, key="opi_a_handling")
+            idx_a_d = get_default_run_index(drag_options.tolist(), st.session_state.car_a_name)
+            a_drag_str = st.selectbox("Wähle Drag-Daten", drag_options, index=idx_a_d, key="score_a_drag", on_change=on_car_change, args=("score_a_drag", "score_b_drag", drag_runs))
+            idx_a_h = get_default_run_index(handling_options.tolist(), st.session_state.car_a_name)
+            a_handling_str = st.selectbox("Wähle Handling-Daten", handling_options, index=idx_a_h, key="score_a_hand", on_change=on_car_change, args=("score_a_hand", "score_b_hand", handling_runs))
             
         with col2:
             st.subheader("Fahrzeug B (Vergleich)")
-            b_drag_str = st.selectbox("Wähle Drag-Daten (Power & Vmax)", drag_options, key="opi_b_drag")
-            b_handling_str = st.selectbox("Wähle Handling-Daten (Grip & Brake)", handling_options, key="opi_b_handling")
+            idx_b_d = get_default_run_index(drag_options.tolist(), st.session_state.car_b_name)
+            if idx_b_d == 0 and len(drag_options) > 1: idx_b_d = 1
+            b_drag_str = st.selectbox("Wähle Drag-Daten", drag_options, index=idx_b_d, key="score_b_drag", on_change=on_car_change, args=("score_a_drag", "score_b_drag", drag_runs))
+            idx_b_h = get_default_run_index(handling_options.tolist(), st.session_state.car_b_name)
+            if idx_b_h == 0 and len(handling_options) > 1: idx_b_h = 1
+            b_handling_str = st.selectbox("Wähle Handling-Daten", handling_options, index=idx_b_h, key="score_b_hand", on_change=on_car_change, args=("score_a_hand", "score_b_hand", handling_runs))
         
         track_type = st.radio("Streckencharakteristik (Gewichtung):", 
                               ["High Speed (z.B. Le Mans - Power & Aero)", 
@@ -1536,3 +1385,129 @@ with tab_scoring:
                     f'</tbody></table>'
                 )
                 st.markdown(html, unsafe_allow_html=True)
+
+with tab_garage:
+    st.header("📂 Garage (Daten & Logs)")
+    st.markdown("Hier kannst du alle gespeicherten Telemetrie-Aufzeichnungen sehen und endgültig aus der Datenbank löschen.")
+    
+    if runs_df.empty:
+        st.info("Die Datenbank ist derzeit leer.")
+    else:
+        st.dataframe(
+            runs_df[['id', 'run_type', 'vehicle_name', 'vehicle_class', 'track_name', 'timestamp', 'notes']], 
+            width='stretch',
+            hide_index=True
+        )
+        
+        run_options_edit = get_run_options(runs_df)
+        
+        st.markdown("---")
+        st.subheader("💾 Backup (Export / Import)")
+        st.markdown("Hier kannst du die komplette Datenbank herunterladen oder ein existierendes Backup wiederherstellen.")
+        
+        col_down, col_up = st.columns(2)
+        
+        with col_down:
+            try:
+                with open(DB_PATH, "rb") as f:
+                    db_bytes = f.read()
+                    st.download_button(
+                        label="📥 Gesamte Datenbank (.db) herunterladen",
+                        data=db_bytes,
+                        file_name=f"lmu_telemetry_backup_{time.strftime('%Y%m%d_%H%M%S')}.db",
+                        mime="application/octet-stream",
+                        width='stretch'
+                    )
+            except Exception as e:
+                 st.error("Fehler beim Erstellen des Backups.")
+                
+        with col_up:
+            uploaded_file = st.file_uploader("📤 Datenbank (.db) hochladen", type=["db"])
+            if uploaded_file is not None:
+                if st.button("⚠️ Backup einspielen (Überschreibt alle Daten!)", type="primary", width='stretch'):
+                    try:
+                        with open(DB_PATH, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        st.success("Backup erfolgreich eingespielt! Seite lädt neu...")
+                        time.sleep(1.5)
+                        st.rerun()
+                    except Exception as e:
+                        st.error("Fehler beim Einspielen des Backups.")
+
+        st.markdown("---")
+
+        st.subheader("📊 Einzelnen Run exportieren")
+        selected_export_str = st.selectbox("Wähle einen Run für den CSV-Export", run_options_edit, key="export_selectbox")
+        
+        if selected_export_str:
+            export_id = int(selected_export_str.split(" - ")[0])
+            export_df = load_telemetry(export_id)
+            if not export_df.empty:
+                csv = export_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label=f"📥 Run {export_id} als CSV herunterladen",
+                    data=csv,
+                    file_name=f"lmu_run_{export_id}.csv",
+                    mime="text/csv",
+                )
+
+        st.markdown("---")
+        
+        st.subheader("📝 Notiz bearbeiten / hinzufügen")
+        selected_note_str = st.selectbox("Wähle einen Run, um eine Notiz zu bearbeiten", run_options_edit, key="note_selectbox")
+        
+        if selected_note_str:
+            note_id = int(selected_note_str.split(" - ")[0])
+            current_note = runs_df[runs_df['id'] == note_id].iloc[0].get('notes', '')
+            if pd.isna(current_note):
+                current_note = ""
+                
+            new_note = st.text_area("Notiz (z.B. Setup-Vorgaben, Besonderheiten beim Launch, etc.):", value=current_note)
+            
+            if st.button("💾 Notiz speichern"):
+                try:
+                    conn_note = sqlite3.connect(DB_PATH)
+                    c_note = conn_note.cursor()
+                    c_note.execute("UPDATE runs SET notes = ? WHERE id = ?", (new_note, note_id))
+                    conn_note.commit()
+                    conn_note.close()
+                    st.success("Notiz erfolgreich gespeichert!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Fehler: {e}")
+
+        st.markdown("---")
+        
+        st.subheader("🗑️ Eintrag löschen")
+        st.warning("⚠️ Beim Löschen werden auch tausende Telemetrie-Datenpunkte aus der Datenbank entfernt. Dies kann nicht rückgängig gemacht werden.")
+        selected_del_str = st.selectbox("Wähle einen Run zum Löschen aus", run_options_edit, key="delete_selectbox")
+        
+        if selected_del_str:
+            del_id = int(selected_del_str.split(" - ")[0])
+            del_info = runs_df[runs_df['id'] == del_id].iloc[0]
+            st.error(f"⚠️ **Folgender Eintrag wird gelöscht:**\n\n**ID:** `{del_id}` | **Typ:** `{del_info['run_type']}` | **Fahrzeug:** `{del_info['vehicle_name']}` | **Strecke:** `{del_info['track_name']}` | **Zeit:** `{del_info['timestamp']}`")
+        
+        if st.button("🗑️ Run permanent löschen", type="primary"):
+            del_id = int(selected_del_str.split(" - ")[0])
+            try:
+                conn_del = sqlite3.connect(DB_PATH)
+                c = conn_del.cursor()
+                # Lösche raw telemetry
+                c.execute(f"DELETE FROM telemetry_data WHERE run_id = {del_id}")
+                # Lösche run Metadaten
+                c.execute(f"DELETE FROM runs WHERE id = {del_id}")
+                # Lösche evtl. generierte Overlay-Profile
+                try:
+                     c.execute(f"DELETE FROM saved_profiles WHERE run_id = {del_id}")
+                except:
+                     pass
+                conn_del.commit()
+                conn_del.close()
+                
+                st.success(f"Run {del_id} und alle dazugehörigen Telemetriedaten wurden gelöscht!")
+                time.sleep(1) # kurzes Delay für die Success-Nachricht
+                st.rerun()
+            except Exception as e:
+                st.error(f"Fehler beim Löschen: {e}")
+
